@@ -11,7 +11,7 @@ import uv, error, streams, nettype
 
 type
   TcpServer* = ref object ## Abstraction of TCP server.
-    onConnection*: proc (conn: TcpConnection) {.closure, gcsafe.}
+    onConnection*: proc (sock: TcpSocket) {.closure, gcsafe.}
     onClose*: proc (err: ref NodeError) {.closure, gcsafe.}
     handle: Tcp
     maxConnections: int
@@ -65,10 +65,10 @@ proc connectionCb(handle: ptr Stream, status: cint) {.cdecl.} =
   if status < 0 or server.connections >= server.maxConnections or server.onConnection == nil:
     discard
   else:
-    var conn = accept(addr(server.handle)) do (err: ref NodeError):
+    var sock = accept(addr(server.handle)) do (err: ref NodeError):
       dec(server.connections)
     inc(server.connections)
-    server.onConnection(conn)
+    server.onConnection(sock)
 
 proc serve*(server: TcpServer, port: Port, hostname = "127.0.0.1", backlog = 511, domain = Domain.AF_INET) =
   ## Start the process of listening for incoming TCP connections on the specified 
