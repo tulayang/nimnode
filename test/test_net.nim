@@ -12,25 +12,25 @@ suite "TCP Server and Client":
       var server = newTcpServer()
       var coin = 0
       server.serve(Port(10000), "localhost")
-      server.onConnection = proc (sock: TcpSocket) =
+      server.onConnection = proc (stream: TcpStream) =
         var message = ""
   
-        sock.onData = proc (data: pointer, size: int) =
+        stream.onRead = proc (data: pointer, size: int) =
           var s = newString(size)
           copyMem(s.cstring, data, size)
           add(message, s)
 
-        sock.onEnd = proc () =
+        stream.onReadEnd = proc () =
           check coin == 0
           inc(coin)
-          write(sock, "recved " & message)
-          closeSoon(sock)
+          write(stream, "recved " & message)
+          closeSoon(stream)
 
-        sock.onFinish = proc () =  
+        stream.onWriteEnd = proc () =  
           check coin == 1
           inc(coin)
 
-        sock.onClose = proc (err: ref NodeError) =
+        stream.onClose = proc (err: ref NodeError) =
           check err == nil
           check coin == 2
           inc(coin)
@@ -41,31 +41,31 @@ suite "TCP Server and Client":
         echo "       >>> server closed, coin=", $coin
 
     proc consClient() =
-      var sock = connect(Port(10000), "localhost")
+      var stream = connect(Port(10000), "localhost")
       var message = ""
       var coin = 0
 
-      sock.onConnect = proc () =
+      stream.onConnect = proc () =
         check coin == 0
         inc(coin)
-        write(sock, "hello world")
-        writeEnd(sock)
+        write(stream, "hello world")
+        writeEnd(stream)
 
-      sock.onData = proc (data: pointer, size: int) =
+      stream.onRead = proc (data: pointer, size: int) =
         var s = newString(size)
         copyMem(s.cstring, data, size)
         add(message, s)
 
-      sock.onEnd = proc () =
+      stream.onReadEnd = proc () =
         check message == "recved hello world"
         check coin == 2
         inc(coin)
 
-      sock.onFinish = proc () =  
+      stream.onWriteEnd = proc () =  
         check coin == 1
         inc(coin)
 
-      sock.onClose = proc (err: ref NodeError) =
+      stream.onClose = proc (err: ref NodeError) =
         check err == nil
         check coin == 3
         echo "       >>> client closed, coin=", $coin
@@ -79,25 +79,25 @@ suite "TCP Server and Client":
       var server = newTcpServer()
       var coin = 0
       server.serve(Port(10000), "localhost")
-      server.onConnection = proc (sock: TcpSocket) =
+      server.onConnection = proc (stream: TcpStream) =
         var message = ""
   
-        sock.onData = proc (data: pointer, size: int) =
+        stream.onRead = proc (data: pointer, size: int) =
           var s = newString(size)
           copyMem(s.cstring, data, size)
           add(message, s)
 
-        sock.onEnd = proc () =
+        stream.onReadEnd = proc () =
           check coin == 0
           inc(coin)
-          write(sock, "recved " & message)
-          closeSoon(sock)
+          write(stream, "recved " & message)
+          closeSoon(stream)
 
-        sock.onFinish = proc () =  
+        stream.onWriteEnd = proc () =  
           check coin == 1
           inc(coin)
 
-        sock.onClose = proc (err: ref NodeError) =
+        stream.onClose = proc (err: ref NodeError) =
           check err == nil
           check coin == 2
           inc(coin)
@@ -109,40 +109,40 @@ suite "TCP Server and Client":
         echo "       >>> server closed, coin=", $coin
 
     proc consClient() =
-      var sock = connect(Port(10000), "localhost")
+      var stream = connect(Port(10000), "localhost")
       var message = ""
       var coin = 0
 
-      sock.onConnect = proc () =
+      stream.onConnect = proc () =
         check coin == 0
         inc(coin)
         var buf = cast[cstring](alloc(3))
         buf[0] = 'a'
         buf[1] = 'b'
         buf[2] = 'c'
-        write(sock, cast[pointer](cast[ByteAddress](buf) + 1), 2) # "bc"
+        write(stream, cast[pointer](cast[ByteAddress](buf) + 1), 2) # "bc"
         buf[1] = 'e'                                               
-        write(sock, cast[pointer](cast[ByteAddress](buf) + 1), 2) # "ec"
+        write(stream, cast[pointer](cast[ByteAddress](buf) + 1), 2) # "ec"
         buf[1] = 'o'                                              # "ec" => "oc"
-        write(sock, cast[pointer](cast[ByteAddress](buf) + 1), 2) # "oc"
-        writeEnd(sock)
+        write(stream, cast[pointer](cast[ByteAddress](buf) + 1), 2) # "oc"
+        writeEnd(stream)
 
-      sock.onData = proc (data: pointer, size: int) =
+      stream.onRead = proc (data: pointer, size: int) =
         var s = newString(size)
         copyMem(s.cstring, data, size)
         add(message, s)
 
-      sock.onEnd = proc () =
+      stream.onReadEnd = proc () =
         check message == "recved bcococ"
         check coin == 2
         inc(coin)
-        closeSoon(sock)
+        closeSoon(stream)
 
-      sock.onFinish = proc () =  
+      stream.onWriteEnd = proc () =  
         check coin == 1
         inc(coin)
 
-      sock.onClose = proc (err: ref NodeError) =
+      stream.onClose = proc (err: ref NodeError) =
         check err == nil
         check coin == 3
         echo "       >>> client closed, coin=", $coin
@@ -156,26 +156,26 @@ suite "TCP Server and Client":
       var server = newTcpServer()
       var coin = 0
       server.serve(Port(10000), "localhost")
-      server.onConnection = proc (sock: TcpSocket) =
+      server.onConnection = proc (stream: TcpStream) =
         var message = ""
   
-        sock.onData = proc (data: pointer, size: int) =
+        stream.onRead = proc (data: pointer, size: int) =
           var s = newString(size)
           copyMem(s.cstring, data, size)
           add(message, s)
           if message.len == 6:
-            write(sock, "recved " & message)
-            writeEnd(sock)
+            write(stream, "recved " & message)
+            writeEnd(stream)
 
-        sock.onEnd = proc () =
+        stream.onReadEnd = proc () =
           check coin == 1
           inc(coin)
 
-        sock.onFinish = proc () =  
+        stream.onWriteEnd = proc () =  
           check coin == 0
           inc(coin)
 
-        sock.onClose = proc (err: ref NodeError) =
+        stream.onClose = proc (err: ref NodeError) =
           if err != nil:
             echo err.msg
           check coin == 2
@@ -187,41 +187,41 @@ suite "TCP Server and Client":
         echo "       >>> server closed, coin=", $coin
 
     proc consClient() =
-      var sock = connect(Port(10000), "localhost")
+      var stream = connect(Port(10000), "localhost")
       var message = ""
       var coin = 0
-      writeCork(sock)
+      writeCork(stream)
 
-      sock.onConnect = proc () =
+      stream.onConnect = proc () =
         check coin == 0
         inc(coin)
         var buf = cast[cstring](alloc(3))
         buf[0] = 'a'
         buf[1] = 'b'
         buf[2] = 'c'
-        write(sock, cast[pointer](cast[ByteAddress](buf) + 1), 2) # "bc"
+        write(stream, cast[pointer](cast[ByteAddress](buf) + 1), 2) # "bc"
         buf[1] = 'e'                                              # "bc" => "ec" 
-        write(sock, cast[pointer](cast[ByteAddress](buf) + 1), 2) # "ec" 
+        write(stream, cast[pointer](cast[ByteAddress](buf) + 1), 2) # "ec" 
         buf[1] = 'o'                                              # "ec" => "oc"
-        write(sock, cast[pointer](cast[ByteAddress](buf) + 1), 2) # "oc" 
-        writeUncork(sock)
+        write(stream, cast[pointer](cast[ByteAddress](buf) + 1), 2) # "oc" 
+        writeUncork(stream)
 
-      sock.onData = proc (data: pointer, size: int) =
+      stream.onRead = proc (data: pointer, size: int) =
         var s = newString(size)
         copyMem(s.cstring, data, size)
         add(message, s)
 
-      sock.onEnd = proc () =
+      stream.onReadEnd = proc () =
         check message == "recved ocococ"
         check coin == 1
         inc(coin)
-        closeSoon(sock)
+        closeSoon(stream)
 
-      sock.onFinish = proc () =  
+      stream.onWriteEnd = proc () =  
         check coin == 2
         inc(coin)
 
-      sock.onClose = proc (err: ref NodeError) =
+      stream.onClose = proc (err: ref NodeError) =
         check coin == 3
         echo "       >>> client closed, coin=", $coin
 

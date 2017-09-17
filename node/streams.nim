@@ -4,9 +4,12 @@
 #    See the file "LICENSE", included in this distribution, for
 #    details about the copyright. 
 
-## This module implements a duplex (readable, writable) stream based on libuv. A
-## stream is an abstract interface which provides reading and writing for 
+## This module provides an abstraction of a duplex communication based on libuv. 
+## ``DuplexStream`` is an abstract interface which provides reading and writing for 
 ## non-blocking I/O.
+## 
+## There are 3 duplex implementations in the form of ``TcpStream``, ``TtyStream``, 
+## ``PipeStream``.
 
 import uv, error, nettype
 
@@ -21,351 +24,387 @@ else:
   const WriteOverLevel* = 16 * 1024 
 
 type
-  StreamReader = object
-    buf: array[BufSize, char]
-    bufLen: int
-
-  StreamWriter = object
-    req: Write
-    buf: seq[tuple[base: pointer, length: int, cb: proc (err: ref NodeError) {.closure, gcsafe.}]]
-    bufLen: int
-    bufQueueSize: int
-    bufWritingSize: int
-    writingCb: proc (err: ref NodeError) {.closure, gcsafe.}
-
   StreamStat = enum   
-    statClosed, statClosing, 
-    statRDFlowing, statRDStoped, statRDEnded, statRDEndEmitted, 
-    statWRReady, statWRNeedDrain, statWRWriting, statWRCorked, statWREnded, statWREndEmitted
+    statClosed, statWaitingClosed, 
+    statFlowing, statReading, statReadEnded, statReadEndEmitted, 
+    statWriteReady, statWriteNeedDrain, statWriting, statWriteCorked, statWriteEnded, statWriteEndEmitted
 
-  UvStream* = ref object of RootObj
-    onData*: proc (data: pointer, size: int) {.closure, gcsafe.}
-    onEnd*: proc () {.closure, gcsafe.}
-    onDrain*: proc () {.closure, gcsafe.}
-    onFinish*: proc () {.closure, gcsafe.}
-    onClose*: proc (err: ref NodeError) {.closure, gcsafe.}
-    onCloseHook: proc (err: ref NodeError) {.closure, gcsafe.}
-    reader: StreamReader
-    writer: StreamWriter
-    shutdown: Shutdown
-    stats: set[StreamStat]
+  DuplexStream* = ref object of RootObj ## Abstract interface are both readable and writable. 
     handle: Stream
+    readBuf: array[BufSize, char]
+    readBufLen: int
+    readCb: proc (data: pointer, size: int) {.closure, gcsafe.}
+    readEndCb: proc () {.closure, gcsafe.}
+    writeBuf: seq[tuple[base: pointer, length: int, cb: proc (err: ref NodeError) {.closure, gcsafe.}]]
+    writeBufLen: int
+    writeQueueSize: int
+    writeDrainCb: proc () {.closure, gcsafe.}
+    writeEndCb: proc () {.closure, gcsafe.}
+    writingReq: Write
+    writingSize: int
+    writingCb: proc (err: ref NodeError) {.closure, gcsafe.}
+    shutdown: Shutdown
+    closeCb: proc (err: ref NodeError) {.closure, gcsafe.}
+    closeHookCb: proc (err: ref NodeError) {.closure, gcsafe.}
     error: ref NodeError
+    stats: set[StreamStat]
+
+proc `onRead=`*(S: DuplexStream, cb: proc (data: pointer, size: int) {.closure, gcsafe.}) =
+  ## Sets the callback which will be invoked when reading a chunk of data.
+  S.readCb = cb
+
+proc `onReadEnd=`*(S: DuplexStream, cb: proc () {.closure, gcsafe.}) =
+  ## Sets the callback which will be invoked when reading the end of file.
+  S.readEndCb = cb
+
+proc `onWriteDrain=`*(S: DuplexStream, cb: proc () {.closure, gcsafe.}) =
+  ## Sets the callback which will be invoked when writing buffers is become empty from large than ``WriteOverLevel``.
+  S.writeDrainCb = cb
+
+proc `onWriteEnd=`*(S: DuplexStream, cb: proc () {.closure, gcsafe.}) =
+  ## Sets the callback which will be invoked when the write side is shutdowned.
+  S.writeEndCb = cb
+
+proc `onClose=`*(S: DuplexStream, cb: proc (err: ref NodeError) {.closure, gcsafe.}) =
+  ## Sets the callback which will be invoked when the stream is closed. If an error occurs, the callback will
+  ##  be called with the error as its first argument.
+  S.closeCb = cb
 
 template offsetChar(x: pointer, i: int): pointer =
   cast[pointer](cast[ByteAddress](x) + i * sizeof(char))
 
-proc closeCb(handle: ptr Handle) {.cdecl.} =
-  var stream = cast[UvStream](handle.data)
-  GC_unref(stream)
-  # for writing 
-  if stream.writer.writingCb != nil:
-    stream.writer.writingCb(stream.error)
-  # for buffer
-  for i in 0..<stream.writer.bufLen:
-    let cb = stream.writer.buf[i].cb
-    if cb != nil:
-      cb(stream.error)
-  setLen(stream.writer.buf, 0)
-  stream.writer.bufLen = 0
-  stream.writer.bufQueueSize = 0
-  stream.writer.bufWritingSize = 0
-  stream.writer.writingCb = nil
-  stream.reader.bufLen = 0
-  if stream.onCloseHook != nil:
-    stream.onCloseHook(stream.error)
-  if stream.onClose != nil:
-    stream.onClose(stream.error)
-  elif stream.error != nil:
-    raise stream.error
+proc clearRead(S: DuplexStream) =
+  S.readBufLen = 0
 
-proc close*(stream: UvStream) =
-  ## Close ``stream``. Handles that wrap file descriptors are closed immediately.
-  if statClosed notin stream.stats:
-    excl(stream.stats, statClosing)
-    incl(stream.stats, statClosed)
-    close(cast[ptr Handle](addr(stream.handle)), closeCb)
+proc clearWrite(S: DuplexStream) =
+  # if there is writing request
+  if S.writingCb != nil:
+    S.writingCb(S.error)
+    S.writingCb = nil
+  # if there are still unprocessed write requests
+  for i in 0..<S.writeBufLen:
+    let cb = S.writeBuf[i].cb
+    if cb != nil:
+      cb(S.error)
+  setLen(S.writeBuf, 0)
+  S.writeBufLen = 0
+  S.writeQueueSize = 0
+  S.writingSize = 0
+
+proc closeCb(handle: ptr Handle) {.cdecl.} =
+  var S = cast[DuplexStream](handle.data)
+  GC_unref(S)
+  clearRead(S)
+  clearWrite(S)
+  if S.closeHookCb != nil:
+    S.closeHookCb(S.error)
+  if S.closeCb != nil:
+    S.closeCb(S.error)
+  elif S.error != nil:
+    raise S.error
+
+proc close*(S: DuplexStream) =
+  ## Close ``S``. Handles that wrap file descriptors are closed immediately.
+  if statClosed notin S.stats:
+    incl(S.stats, statClosed)
+    close(cast[ptr Handle](addr(S.handle)), closeCb)
 
 proc shutdownCb(req: ptr Shutdown, status: cint) {.cdecl.} =
-  let stream = cast[UvStream](cast[ptr Stream](req.handle).data) 
-  incl(stream.stats, statWREndEmitted)
+  let S = cast[DuplexStream](cast[ptr Stream](req.handle).data) 
+  incl(S.stats, statWriteEndEmitted)
   let err = status
   if err < 0:
-    stream.error = newNodeError(err)
-    close(stream)
+    S.error = newNodeError(err)
+    close(S)
   else:
-    if stream.onFinish != nil:
-      stream.onFinish() 
-    if statClosing in stream.stats or statRDEndEmitted in stream.stats:
-      close(stream)
+    if S.writeEndCb != nil:
+      S.writeEndCb() 
+    if statWaitingClosed in S.stats or statReadEndEmitted in S.stats:
+      close(S)
 
-proc doClear(stream: UvStream): cint {.gcsafe.}
+proc doClearBuf(S: DuplexStream): cint {.gcsafe.}
 
-proc writeEnd*(stream: UvStream) = 
+proc writeEnd*(S: DuplexStream) = 
   ## Shutdown the outgoing (write) side and waits for all pending write requests to complete.
-  if statClosed  notin stream.stats and 
-     statWREnded notin stream.stats: 
-    incl(stream.stats, statWREnded)
-    if statWRCorked in stream.stats:
-      excl(stream.stats, statWRCorked)
-    if statWRReady    in   stream.stats and 
-       statWRWriting notin stream.stats and 
-       stream.writer.bufLen > 0:
-      incl(stream.stats, statWRWriting)
-      let err = doClear(stream)
+  if statClosed     notin S.stats and 
+     statWriteEnded notin S.stats: 
+    incl(S.stats, statWriteEnded)
+    if statWriteCorked in S.stats:
+      excl(S.stats, statWriteCorked)
+    if statWriteReady in    S.stats and 
+       statWriting    notin S.stats and 
+       S.writeBufLen > 0:
+      let err = doClearBuf(S)
       if err < 0:
-        stream.error = newNodeError(err)
-        close(stream)
+        S.error = newNodeError(err)
+        close(S)
         return
-    let err = shutdown(addr(stream.shutdown), 
-                       cast[ptr Stream](addr(stream.handle)), shutdownCb)
+      incl(S.stats, statWriting)
+    let err = shutdown(addr(S.shutdown), 
+                       cast[ptr Stream](addr(S.handle)), shutdownCb)
     if err < 0:
-      stream.error = newNodeError(err)
-      close(stream)
+      S.error = newNodeError(err)
+      close(S)
 
-proc closeSoon*(stream: UvStream) = 
-  ## Shutdown the outgoing (write) side. After all pending write requests 
-  ## are completed, close the ``stream``.
-  if statClosed  notin stream.stats and 
-     statClosing notin stream.stats:
-    incl(stream.stats, statClosing)
-    if statWREnded notin stream.stats:
-      writeEnd(stream)
-    elif statWREndEmitted notin stream.stats:
+proc closeSoon*(S: DuplexStream) = 
+  ## Shutdown the outgoing (write) side and waits for all pending write requests to complete.
+  ## After that, close ``S``.
+  if statClosed  notin S.stats and 
+     statWaitingClosed notin S.stats:
+    incl(S.stats, statWaitingClosed)
+    if statWriteEnded notin S.stats:
+      writeEnd(S)
+    elif statWriteEndEmitted notin S.stats:
       discard # shutdown, wait for shutdownCb
     else:
-      close(stream)
-    assert statWREnded in stream.stats
+      close(S)
+    assert statWriteEnded in S.stats
 
-proc allocCb(handle: ptr Handle, size: csize, buf: ptr Buffer) {.cdecl.} =
-  let stream = cast[UvStream](handle.data)
-  buf.base = offsetChar(stream.reader.buf[0].addr, stream.reader.bufLen) 
-  buf.length = BufSize - stream.reader.bufLen
-
-proc readCb(handle: ptr Stream, nread: cssize, buf: ptr Buffer) {.cdecl.} =
-  if nread == 0: # EINTR or EAGAIN or EWOULDBLOCK
-    return
-  let stream = cast[UvStream](handle.data)
-  if nread < 0:
-    if cint(nread) == uv.EOF:
-      incl(stream.stats, statRDEnded)
-      if statRDFlowing in stream.stats:
-        incl(stream.stats, statRDEndEmitted)
-        if stream.onEnd != nil:
-          stream.onEnd()
-        if statWREndEmitted in stream.stats:
-          close(stream)
-      ##############################
-      # if not stream.allowHalfOpen:
-      #   if statWREndEmitted in stream.stats:
-      #     stream.close()
-      #   elif statWriteEnd in stream.stats:
-      #     discard
-      #   else:
-      #     stream.endSoon()
-      # else:
-      #   if statWREndEmitted in stream.stats:
-      #     stream.close()
-      ####################
-    else:
-      stream.error = newNodeError(cint(nread))
-      close(stream)
-  else:
-    if statRDFlowing in stream.stats:
-      if stream.onData != nil:
-        stream.onData(addr(stream.reader.buf[0]), int(cint(nread)))
-        stream.reader.bufLen = 0
-    else:
-      inc(stream.reader.bufLen, int(cint(nread)))
-      if stream.reader.bufLen >= BufSize:
-        let err = readStop(cast[ptr Stream](addr(stream.handle)))
-        if err < 0:
-          stream.error = newNodeError(err)
-          close(stream)
-        else:
-          incl(stream.stats, statRDStoped)    
-
-proc readResume*(stream: UvStream) =
-  if statRDFlowing notin stream.stats:
-    incl(stream.stats, statRDFlowing)
-    if statClosed  notin stream.stats and 
-       statClosing notin stream.stats:
-      if statRDEnded in stream.stats:
-        if statRDEndEmitted notin stream.stats:
-          incl(stream.stats, statRDEndEmitted)
-          if stream.onEnd != nil:
-            stream.onEnd()
-          if statWREndEmitted in stream.stats:
-            close(stream)
-      else:
-        if statRDStoped in stream.stats:
-          let err = readStart(cast[ptr Stream](addr(stream.handle)), allocCb, readCb)
-          if err < 0:
-            stream.error = newNodeError(err)
-            close(stream)
-          else:
-            excl(stream.stats, statRDStoped)
-            if stream.reader.bufLen > 0:
-              assert stream.reader.bufLen == BufSize
-              stream.onData(addr(stream.reader.buf[0]), stream.reader.bufLen)
-              stream.reader.bufLen = 0  
-
-proc readPause*(stream: UvStream) =
-  excl(stream.stats, statRDFlowing)
-
-proc writeCb(req: ptr Write, status: cint) {.cdecl.} =
-  let stream = cast[UvStream](cast[ptr Stream](req.handle).data) 
+proc writingCb(req: ptr Write, status: cint) {.cdecl.} =
+  let S = cast[DuplexStream](cast[ptr Stream](req.handle).data) 
   if status < 0:
-    stream.error = newNodeError(status)
-    close(stream)
+    S.error = newNodeError(status)
+    close(S)
   else:
-    assert statClosed notin stream.stats
-    dec(stream.writer.bufQueueSize, stream.writer.bufWritingSize)
-    stream.writer.bufWritingSize = 0
-    if stream.writer.bufQueueSize == 0 and statWRNeedDrain in stream.stats:
-      excl(stream.stats, statWRNeedDrain)
-      if stream.onDrain != nil:
-        stream.onDrain()
-    if stream.writer.writingCb != nil:
-      stream.writer.writingCb(nil)
-      stream.writer.writingCb = nil
-    if stream.writer.bufLen > 0 and (statWREnded in stream.stats or statWRCorked notin stream.stats):
-      let err = doClear(stream)
+    assert statClosed  notin S.stats
+    assert statWriting in    S.stats
+    dec(S.writeQueueSize, S.writingSize)
+    S.writingSize = 0
+    if S.writeQueueSize == 0 and statWriteNeedDrain in S.stats:
+      excl(S.stats, statWriteNeedDrain)
+      if S.writeDrainCb != nil:
+        S.writeDrainCb()
+    if S.writingCb != nil:
+      S.writingCb(nil)
+      S.writingCb = nil
+    if S.writeBufLen > 0 and (statWriteEnded in S.stats or statWriteCorked notin S.stats):
+      let err = doClearBuf(S)
       if err < 0:
-        stream.error = newNodeError(err)
-        close(stream)
+        S.error = newNodeError(err)
+        close(S)
     else:
-      excl(stream.stats, statWRWriting)
+      excl(S.stats, statWriting)
 
-proc doWrite(stream: UvStream, buf: pointer, size: int, 
-             cb: proc (err: ref NodeError) {.closure, gcsafe.}): cint =
+proc doWriteData(S: DuplexStream, buf: pointer, size: int, 
+                 cb: proc (err: ref NodeError) {.closure, gcsafe.}): cint =
   var buffer = Buffer()
   buffer.base = buf
   buffer.length = size
-  stream.writer.req = Write()
-  stream.writer.writingCb = cb
-  stream.writer.bufWritingSize = size
-  return write(addr(stream.writer.req), cast[ptr Stream](addr(stream.handle)), 
-               addr(buffer), 1, writeCb)
+  S.writingReq = Write()
+  S.writingCb = cb
+  S.writingSize = size
+  result = write(addr(S.writingReq), cast[ptr Stream](addr(S.handle)), 
+                 addr(buffer), 1, writingCb)
 
-proc doWrite(stream: UvStream): cint =
-  assert stream.writer.bufLen > 1
-  let n = stream.writer.bufLen
-  var bufWritingSize = 0
+proc doWriteBuf(S: DuplexStream): cint =
+  assert S.writeBufLen > 1
+  let n = S.writeBufLen
+  var writingSize = 0
   var bufs = cast[ptr Buffer](alloc(n * sizeof(Buffer)))
   var cbs = newSeqOfCap[proc (err: ref NodeError) {.closure, gcsafe.}](n)
   for i in 0..<n:
     var buf = cast[ptr Buffer](cast[ByteAddress](bufs) + i * sizeof(Buffer))
-    buf.base = stream.writer.buf[i].base
-    buf.length = stream.writer.buf[i].length
-    add(cbs, stream.writer.buf[i].cb)
-    inc(bufWritingSize, stream.writer.buf[i].length)
-  stream.writer.req = Write()
-  let err = write(addr(stream.writer.req), cast[ptr Stream](addr(stream.handle)), 
-                  bufs, cuint(n), writeCb)
-  if err < 0:
+    buf.base = S.writeBuf[i].base
+    buf.length = S.writeBuf[i].length
+    add(cbs, S.writeBuf[i].cb)
+    inc(writingSize, S.writeBuf[i].length)
+  S.writingReq = Write()
+  result = write(addr(S.writingReq), cast[ptr Stream](addr(S.handle)), 
+                 bufs, cuint(n), writingCb)
+  if result < 0:
     dealloc(bufs)
   else:
     GC_ref(cbs)
-    stream.writer.writingCb = proc (err: ref NodeError) =
+    S.writingCb = proc (err: ref NodeError) =
       for cb in cbs:
         if cb != nil:
           cb(err)
       GC_unref(cbs)
       cbs = nil
       dealloc(bufs)
-    stream.writer.bufWritingSize = bufWritingSize
+    S.writingSize = writingSize
 
-proc doClear(stream: UvStream): cint =
-  assert stream.writer.bufLen > 0
-  if stream.writer.bufLen == 1:
-    let err = doWrite(stream, stream.writer.buf[0].base, 
-                      stream.writer.buf[0].length, stream.writer.buf[0].cb)
+proc doClearBuf(S: DuplexStream): cint =
+  assert S.writeBufLen > 0
+  if S.writeBufLen == 1:
+    let err = doWriteData(S, S.writeBuf[0].base, 
+                          S.writeBuf[0].length, S.writeBuf[0].cb)
     if err < 0:
       return err
   else:
-    let err = doWrite(stream)
+    let err = doWriteBuf(S)
     if err < 0:
       return err
-  setLen(stream.writer.buf, 0)
-  stream.writer.bufLen = 0
+  setLen(S.writeBuf, 0)
+  S.writeBufLen = 0
+  return 0
 
-proc write*(stream: UvStream, buf: pointer, size: int, 
+proc addWriteBuf(S: DuplexStream, buf: pointer, size: int, 
+                 cb: proc (err: ref NodeError) {.closure, gcsafe.}) =
+  add(S.writeBuf, (base: buf, length: size, cb: cb))
+  inc(S.writeBufLen)
+  inc(S.writeQueueSize, size)   
+  if S.writeQueueSize >= WriteOverLevel:
+    incl(S.stats, statWriteNeedDrain)
+
+proc write*(S: DuplexStream, buf: pointer, size: int, 
             cb: proc (err: ref NodeError) {.closure, gcsafe.} = nil) =
-  if statClosed  in stream.stats or 
-     statWREnded in stream.stats:
-    stream.error = newNodeError(ENOD_WREND)
+  ## Writes data to the underlying system, and calls the supplied callback once the data has been fully 
+  ## handled. If an error occurs, the callback will be called with the error as its first argument.
+  if statClosed     in S.stats or 
+     statWriteEnded in S.stats:
+    S.error = newNodeError(END_WREND)
     if cb != nil:
-      cb(stream.error)
-    close(stream)
-  elif statWRWriting in  stream.stats or 
-       statWRCorked  in  stream.stats or 
-       statWRReady notin stream.stats: 
-    add(stream.writer.buf, (base: buf, length: size, cb: cb))
-    inc(stream.writer.bufLen)
-    inc(stream.writer.bufQueueSize, size)   
-    if stream.writer.bufQueueSize >= WriteOverLevel:
-      incl(stream.stats, statWRNeedDrain)
+      cb(S.error)
+    close(S)
+  elif statWriting     in    S.stats or 
+       statWriteCorked in    S.stats or 
+       statWriteReady  notin S.stats: 
+    addWriteBuf(S, buf, size, cb)
   else:
-    assert stream.writer.bufLen == 0
-    incl(stream.stats, statWRWriting)
-    let err = doWrite(stream, buf, size, cb)
+    assert S.writeBufLen == 0
+    let err = doWriteData(S, buf, size, cb)
     if err < 0:
-      stream.error = newNodeError(err)
-      close(stream)
+      S.error = newNodeError(err)
+      close(S)
     else:
-      inc(stream.writer.bufQueueSize, size)   
-      if stream.writer.bufQueueSize >= WriteOverLevel:
-        incl(stream.stats, statWRNeedDrain)
+      incl(S.stats, statWriting)
+      inc(S.writeQueueSize, size)   
+      if S.writeQueueSize >= WriteOverLevel:
+        incl(S.stats, statWriteNeedDrain)
 
-proc write*(stream: UvStream, buf: string, 
+proc write*(S: DuplexStream, buf: string, 
             cb: proc (err: ref NodeError) {.closure, gcsafe.} = nil) =
-  ## Writes ``buf`` to ``stream``. 
+  ## Writes data to the underlying system, and calls the supplied callback once the data has been fully 
+  ## handled. If an error occurs, the callback will be called with the error as its first argument.
   GC_ref(buf)
-  write(stream, buf.cstring, buf.len) do (err: ref NodeError):
+  write(S, buf.cstring, buf.len) do (err: ref NodeError):
     GC_unref(buf)
     if cb != nil:
       cb(err)
 
-proc writeCork*(stream: UvStream) =
-  incl(stream.stats, statWRCorked)
+proc writeCork*(S: DuplexStream) =
+  ## Forces buffering of all writes.
+  ## 
+  ## Buffered data will be flushed either at ``writeUncork()`` or at ``writeEnd()`` call.
+  incl(S.stats, statWriteCorked)
 
-proc writeUncork*(stream: UvStream) = 
-  if statWRCorked in stream.stats:
-    excl(stream.stats, statWRCorked)
-    if statClosed    notin stream.stats and 
-       statWREnded   notin stream.stats and 
-       statWRReady   in    stream.stats and 
-       statWRWriting notin stream.stats and
-       stream.writer.bufLen > 0 :
-      incl(stream.stats, statWRWriting)
-      let err = doClear(stream)
+proc writeUncork*(S: DuplexStream) = 
+  ## Flush all data, buffered since ``writeCork()`` call.
+  if statWriteCorked in S.stats:
+    excl(S.stats, statWriteCorked)
+    if statClosed     notin S.stats and 
+       statWriteEnded notin S.stats and 
+       statWriteReady in    S.stats and 
+       statWriting    notin S.stats and
+       S.writeBufLen > 0 :
+      let err = doClearBuf(S)
       if err < 0:
-        stream.error = newNodeError(err)
-        close(stream)
+        S.error = newNodeError(err)
+        close(S)
+      else:
+        incl(S.stats, statWriting)
 
-proc isFlowing*(stream: UvStream): bool =
-  result = statRDFlowing in stream.stats
+proc allocCb(handle: ptr Handle, size: csize, buf: ptr Buffer) {.cdecl.} =
+  let S = cast[DuplexStream](handle.data)
+  if statFlowing in S.stats:
+    buf.base = S.readBuf[0].addr
+    buf.length = BufSize
+  else:
+    buf.base = offsetChar(S.readBuf[0].addr, S.readBufLen) 
+    buf.length = BufSize - S.readBufLen
 
-proc isNeedDrain*(stream: UvStream): bool =
-  result = statWRNeedDrain in stream.stats
+proc readOnEnd(S: DuplexStream) =
+  incl(S.stats, statReadEnded)
+  if statFlowing in S.stats:
+    incl(S.stats, statReadEndEmitted)
+    if S.readEndCb != nil:
+      S.readEndCb()
+    if statWriteEndEmitted in S.stats:
+      close(S)
 
-proc failed*(stream: UvStream): bool = 
-  result = stream.error != nil
+proc readOnData(S: DuplexStream, size: int) =
+  if statFlowing in S.stats:
+    if S.readCb != nil:
+      S.readCb(addr(S.readBuf[0]), size)
+  else:
+    inc(S.readBufLen, size)
+    if S.readBufLen >= BufSize:
+      let err = readStop(cast[ptr Stream](addr(S.handle)))
+      if err < 0:
+        S.error = newNodeError(err)
+        close(S)
+      else:
+        excl(S.stats, statReading) 
 
-proc error*(stream: UvStream): ref NodeError = 
-  result = stream.error
+proc readCb(handle: ptr Stream, nread: cssize, buf: ptr Buffer) {.cdecl.} =
+  if nread == 0: # EINTR or EAGAIN or EWOULDBLOCK
+    return
+  let S = cast[DuplexStream](handle.data)
+  if nread < 0:
+    if cint(nread) == uv.EOF:
+      readOnEnd(S)
+    else:
+      S.error = newNodeError(cint(nread))
+      close(S)
+  else:
+    readOnData(S, int(cint(nread)))
+
+proc readResume*(S: DuplexStream) =
+  ## Switchs ``S`` into flowing mode, data is read from the underlying 
+  ## system and provided to your program as fast as possible. 
+  if statFlowing notin S.stats:
+    incl(S.stats, statFlowing)
+    if statClosed        notin S.stats and 
+       statWaitingClosed notin S.stats:
+      if statReadEnded in S.stats:
+        if statReadEndEmitted notin S.stats:
+          incl(S.stats, statReadEndEmitted)
+          if S.readEndCb != nil:
+            S.readEndCb()
+          if statWriteEndEmitted in S.stats:
+            close(S)
+      else:
+        if statReading notin S.stats:
+          let err = readStart(cast[ptr Stream](addr(S.handle)), allocCb, readCb)
+          if err < 0:
+            S.error = newNodeError(err)
+            close(S)
+          else:
+            incl(S.stats, statReading)
+            if S.readBufLen > 0:
+              assert S.readBufLen == BufSize
+              if S.readCb != nil:
+                S.readCb(addr(S.readBuf[0]), S.readBufLen)
+              S.readBufLen = 0  
+
+proc readPause*(S: DuplexStream) =
+  ## Switchs ``S`` into paused mode, any data that becomes available
+  ## will remain in the internal buffer.
+  excl(S.stats, statFlowing)
+
+proc isFlowing*(S: DuplexStream): bool =
+  result = statFlowing in S.stats
+
+proc isNeedDrain*(S: DuplexStream): bool =
+  result = statWriteNeedDrain in S.stats
+
+proc failed*(S: DuplexStream): bool = 
+  result = S.error != nil
+
+proc error*(S: DuplexStream): ref NodeError = 
+  result = S.error
 
 type
-  TcpSocket* = ref object of UvStream ## Abstraction of TCP connection. 
-    onConnect*: proc () {.closure, gcsafe.}
+  TcpStream* = ref object of DuplexStream ## Abstraction of TCP communication based on stream IO manner. 
+    connectCb: proc () {.closure, gcsafe.}
 
-proc newTcpSocket(): TcpSocket =
+proc newTcpStream(): TcpStream =
   ## Create a new TCP connection.
   new(result)
   GC_ref(result) 
-  result.writer.buf = @[]
-  result.stats = {statRDStoped}
+  result.writeBuf = @[]
+  result.stats = {}
   let err = init(getDefaultLoop(), cast[ptr Tcp](addr(result.handle)))
   if err < 0:
     result.error = newNodeError(err)
@@ -373,19 +412,23 @@ proc newTcpSocket(): TcpSocket =
   else:
     result.handle.data = cast[pointer](result)
 
+proc `onConnect=`*(S: TcpStream, cb: proc () {.closure, gcsafe.}) =
+  ## Sets the callback which will be invoked when connecting successfuly. 
+  S.connectCb = cb
+
 proc connectCb(req: ptr Connect, status: cint) {.cdecl.} =
-  let sock = cast[TcpSocket](req.data)
+  let S = cast[TcpStream](req.data)
   dealloc(req)
   if status < 0:
-    sock.error = newNodeError(status)
-    close(sock)
+    S.error = newNodeError(status)
+    close(S)
   else:
-    incl(sock.stats, statWRReady)
-    if sock.onConnect != nil:
-      sock.onConnect()
+    incl(S.stats, statWriteReady)
+    if S.connectCb != nil:
+      S.connectCb()
 
-proc connect*(port: Port, hostname = "127.0.0.1", domain = Domain.AF_INET): TcpSocket =
-  ## Establishs an IPv4 or IPv6 TCP connection and returns a fresh ``TcpSocket``.
+proc connect*(port: Port, hostname = "127.0.0.1", domain = Domain.AF_INET): TcpStream =
+  ## Establishs an IPv4 or IPv6 TCP connection and returns a fresh ``TcpStream``.
   template condFree(exp: untyped): untyped =
     let err = exp
     if err < 0:
@@ -394,7 +437,7 @@ proc connect*(port: Port, hostname = "127.0.0.1", domain = Domain.AF_INET): TcpS
       result.error = newNodeError(err)
       close(result)
       return
-  result = newTcpSocket()
+  result = newTcpStream()
   if not result.failed:
     var connectReqPtr = cast[ptr Connect](alloc0(sizeof(Connect)))
     var addrReq: GetAddrInfo
@@ -411,16 +454,17 @@ proc connect*(port: Port, hostname = "127.0.0.1", domain = Domain.AF_INET): TcpS
     readResume(result) 
 
 proc accept*(server: ptr Tcp, 
-             cb: proc (err: ref NodeError) {.closure, gcsafe.} = nil): TcpSocket = 
-  result = newTcpSocket()
-  result.onCloseHook = cb
+             closeCb: proc (err: ref NodeError) {.closure, gcsafe.} = nil): TcpStream = 
+  ## Accept incoming connections, returns a new ``TcpStream`` which is a wrapper of a connection.
+  result = newTcpStream()
+  result.closeHookCb = closeCb
   if not result.failed:
     let err = accept(cast[ptr Stream](server), cast[ptr Stream](addr(result.handle)))
     if err < 0:
       result.error = newNodeError(err)
       close(result)
     else:
-      incl(result.stats, statWRReady)
+      incl(result.stats, statWriteReady)
       readResume(result) 
 
 

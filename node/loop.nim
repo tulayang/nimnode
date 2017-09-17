@@ -8,30 +8,14 @@
 ## It takes care of polling for i/o and scheduling callbacks to be run 
 ## based on different sources of events.
 
-import uv
-
-# proc sleepAsync*(delay: int): Future[void] =
-#   ## Schedules execution of the current async procedure after ``delay`` milliseconds.
-#   ##
-#   ## The procedure will likely not be invoked in precisely ``delay`` milliseconds.
-#   var future = newFuture[void]("sleepAsync")
-#   result = future
-#   discard setTimeout(delay, proc () = complete(future))
-
-# proc nextTick*(): Future[void] =
-#   ## Schedules execution of the current async procedure to the next iteration.
-#   var future = newFuture[void]()
-#   result = future
-#   callSoon(proc () = complete(future))
-
-# proc waitFor*[T](fut: Future[T]): T =
-#   ## **Blocks** the current thread until the specified future completes.
-#   while not fut.finished and run(getDefaultLoop(), runOnce) != 0: discard
+import uv, error
 
 proc runLoop*() =
   ## Begins the global dispatcher poll loop until there are no more active and
   ## referenced opration.
-  discard run(getDefaultLoop(), runDefault)
+  let err = run(getDefaultLoop(), runDefault)
+  if err < 0:
+    raise newNodeError(err)
 
 when not defined(nodeSigPipe) and defined(posix):
   import posix

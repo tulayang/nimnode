@@ -4,9 +4,6 @@
 #    See the file "LICENSE", included in this distribution, for
 #    details about the copyright.
 
-## Provides an asynchronous network wrapper. It contains functions for creating 
-## both servers and clients (called streams). 
-
 import nativesockets
 
 type

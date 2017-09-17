@@ -60,7 +60,7 @@ task doc, "Generate documentation":
     ]
     reGenDoc thisDir() / "doc/uv" / name & ".html"
   for name in [
-    "error",  "loop", "timers", "future", "streams", "net", "httpcore", "httpserver", "httpclient"
+    "error",  "loop", "timers", "streams", "nettype", "net"
   ]:
     exec "nim doc2 -o:$outfile --docSeeSrcUrl:$url $file" % [
       "outfile", thisDir() / "doc" / name & ".html",
@@ -84,12 +84,6 @@ task test_timers, "Run timers tests":
 
 task test_net, "Run net tests":
   runTest "test_net"
-
-task test_http, "Run http tests":
-  runTest "test_http"
-
-task test_httpparser, "Run httpparser tests":
-  runTest "test_httpparser"
 
 task bench_stdlib_asynchttpserver, "Run stdlib_asynchttpserver benchmark":
   runBenchmark "bench_stdlib_asynchttpserver"

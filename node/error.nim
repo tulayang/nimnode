@@ -4,14 +4,13 @@
 #    See the file "LICENSE", included in this distribution, for
 #    details about the copyright.
 
-## Provides error codes corresponding the libuv errornos. 
-## NimNode use these codes to indicate an internal error which caused 
-## by libuv operations.
+## Error codes corresponding to the libuv error constants. NimNode use these 
+## codes to indicate internal errors.
 
 import uv.uv_error, macros
 
 type
-  NodeErrorCode* = enum ## Internal error code corresponding libuv.
+  NodeErrorCode* = enum ## Error code describing specific error.
     E2BIG = "argument list too long"
     EACCES = "permission denied"
     EADDRINUSE = "address already in use"
@@ -89,16 +88,15 @@ type
     EMLINK = "too many links"
     EHOSTDOWN = "host is down"
     UNKNOWNSYS = "unknown system error"
+    END_WREND = "write after end"
 
-    ENOD_WREND = "write after end"
-
-  NodeError* = object of Exception ## Raised if an internal operation failed.
-    errorCode*: NodeErrorCode ## The ``NodeErrorCode`` value.
+  NodeError* = object of Exception ## Raised if a specific operation failed.
+    errorCode*: NodeErrorCode 
     #errorNo*: cint ## The value corresponding to the libuv errorno.
                     # I think we don't need it anymore.
 
 macro defErrors(errorCodes: varargs[NodeErrorCode]): untyped =
-  # I know, I know, this macro is just for fun. Got:
+  # Got:
   #
   #   var errorLen: int = ...
   #   var errorNos: array[errorLen, cint] = ...
@@ -241,7 +239,7 @@ proc newNodeError*(errorCode: cint): ref NodeError =
     result.msg = $errorCodes[i]
 
 proc newNodeError*(errorCode: NodeErrorCode): ref NodeError =
-  ## Creates a new error caused by libuv operation. 
+  ## Creates a new error caused by internal operation. 
   new(result)
   result.errorCode = errorCode
   result.msg = $errorCode

@@ -9,7 +9,7 @@ NimNode Library
 
   "You are not fighting alone!"
 
-NimNode is a library for async programming and communication. This Library uses a future/promise, non-blocking I/O model based on libuv. `What is libuv? <http://libuv.org/>`_  `What is non-blocking I/O? <https://en.wikipedia.org/wiki/Asynchronous_I/O>`_ `What is event-driven? <https://en.wikipedia.org/wiki/Event-driven_programming>`_  `What are future and promise? <https://en.wikipedia.org/wiki/Futures_and_promises>`_
+NimNode is a library for async programming and communication. This Library uses an event-driven, non-blocking I/O model based on libuv. Furthermore, you can use ``Future`` ``async/await`` in the standard library to construct logical workflow to simplify programming tasks. `What is libuv? <http://libuv.org/>`_  `What is non-blocking I/O? <https://en.wikipedia.org/wiki/Asynchronous_I/O>`_ `What is event-driven? <https://en.wikipedia.org/wiki/Event-driven_programming>`_  `What are future and promise? <https://en.wikipedia.org/wiki/Futures_and_promises>`_
 
 NimNode requires libuv library which should have been installed on your operating system. Releases are available as tags in this repository and can be fetched via nimble:
 
@@ -21,7 +21,7 @@ Core modules
 ============
 
 * `error <error.html>`_
-  Provides error codes corresponding the libuv errornos. NimNode use these codes to indicate an internal error which caused by libuv operations.
+  Provides error codes corresponding the libuv constants. NimNode use these codes to indicate an internal error which caused by libuv operations.
 
 * `loop <loop.html>`_
   Loop is the central part of functionality which depends on libuv event loop. It takes care of polling for i/o and scheduling callbacks to be run based on different sources of events.
@@ -29,32 +29,22 @@ Core modules
 * `timers <timers.html>`_
   This module implements a timer dispatcher and a ticker dispatcher. A timer delays an operation after some milliseconds. A ticker delays an operation to the next iteration.
 
-* `future <future.html>`_
-  This module is basically equivalent to the Future of standard library, in addition to a few special procedures.
-
 * `streams <streams.html>`_
-  This module implements a duplex (readable, writable) stream based on libuv. A stream is an abstract interface which provides reading and writing for non-blocking I/O.
+  This module provides an abstraction of a duplex communication based on libuv. ``DuplexStream`` is an abstract interface which provides reading and writing for non-blocking I/O. There are 3 duplex implementations in the form of ``TcpStream``, ``TtyStream``, ``PipeStream``.
+
+* `nettype <nettype.html>`_
 
 * `net <net.html>`_
-  Provides an asynchronous network wrapper. It contains functions for creating both servers and clients (called streams). 
-
-* `httpcore <httpcore.html>`_
-  Base utilities for processing http operations.
-
-* `httpserver <httpserver.html>`_
-  Provides infrastructure for building flexible and efficient HTTP server.
-
-* `httpclient <httpclient.html>`_
-  Provides infrastructure for building flexible and efficient HTTP client.
+  Provides an asynchronous network wrapper. It contains procedures for creating both servers and clients (called streams). 
 
 * `uv <uv.html>`_
   This module is a raw wrapper of libuv. It contains several sub modules.
 
   * `uv_error <uv/uv_error.html>`_
-    In libuv errors are negative numbered constants. As a rule of thumb, whenever there is a status parameter, or an API functions returns an integer, a negative number will imply an error.
+    In libuv errors are negative numbered constants. As a rule of thumb, whenever there is a status parameter, or an API procedures returns an integer, a negative number will imply an error.
 
   * `uv_version <uv/uv_version.html>`_
-    Starting with version 1.0.0 libuv follows the semantic versioning scheme. This means that new APIs can be introduced throughout the lifetime of a major release. In this section you’ll find all macros and functions that will allow you to write or compile code conditionally, in order to work with multiple libuv versions.
+    Starting with version 1.0.0 libuv follows the semantic versioning scheme. This means that new APIs can be introduced throughout the lifetime of a major release. In this section you’ll find all macros and procedures that will allow you to write or compile code conditionally, in order to work with multiple libuv versions.
 
   * `uv_loop <uv/uv_loop.html>`_
     The event loop is the central part of libuv’s functionality. It takes care of polling for i/o and scheduling callbacks to be run based on different sources of events.
@@ -111,14 +101,5 @@ Core modules
     FS Poll handles allow the user to monitor a given path for changes. Unlike fs event, fs poll handles use stat to detect when a file has changed so they can work on file systems where fs event handles can’t.
 
   * `uv_misc <uv/uv_misc.html>`_
-    This section contains miscellaneous functions that don’t really belong in any other section.
-
-Expansion packages
-==================
-
-These packages which do not belong to the core, provide additional features to support for heavy development.
-
-.. raw:: html
-
-  <div id="officialPkgList"></div>
+    This section contains miscellaneous procedures that don’t really belong in any other section.
 

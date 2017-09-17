@@ -11,19 +11,25 @@ import uv, error, streams, nettype
 
 type
   TcpServer* = ref object ## Abstraction of TCP server.
-    onConnection*: proc (sock: TcpSocket) {.closure, gcsafe.}
-    onClose*: proc (err: ref NodeError) {.closure, gcsafe.}
+    connectionCb: proc (stream: TcpStream) {.closure, gcsafe.}
+    closeCb: proc (err: ref NodeError) {.closure, gcsafe.}
     handle: Tcp
     maxConnections: int
     connections: int
     error: ref NodeError
     closed: bool
 
+proc `onConnection=`*(server: TcpServer, cb: proc (stream: TcpStream) {.closure, gcsafe.}) =
+  server.connectionCb = cb
+
+proc `onClose=`*(server: TcpServer, cb: proc (err: ref NodeError) {.closure, gcsafe.}) =
+  server.closeCb = cb
+
 proc closeCb(handle: ptr Handle) {.cdecl.} =
   var server = cast[TcpServer](handle.data) 
   GC_unref(server)
-  if server.onClose != nil:
-    server.onClose(server.error)
+  if server.closeCb != nil:
+    server.closeCb(server.error)
   elif server.error != nil:
     raise server.error 
 
@@ -62,13 +68,13 @@ proc bindAddr(handle: ptr Tcp, port: Port, hostname = "127.0.0.1", domain = Doma
 
 proc connectionCb(handle: ptr Stream, status: cint) {.cdecl.} =
   let server = cast[TcpServer](handle.data)
-  if status < 0 or server.connections >= server.maxConnections or server.onConnection == nil:
+  if status < 0 or server.connections >= server.maxConnections or server.connectionCb == nil:
     discard
   else:
     var sock = accept(addr(server.handle)) do (err: ref NodeError):
       dec(server.connections)
     inc(server.connections)
-    server.onConnection(sock)
+    server.connectionCb(sock)
 
 proc serve*(server: TcpServer, port: Port, hostname = "127.0.0.1", backlog = 511, domain = Domain.AF_INET) =
   ## Start the process of listening for incoming TCP connections on the specified 
