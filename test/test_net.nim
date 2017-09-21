@@ -11,7 +11,7 @@ suite "TCP Server and Client":
     proc consServer() =
       var server = newTcpServer()
       var coin = 0
-      server.serve(Port(10000), "::1", domain=AF_INET6)
+      server.serve(Port(10000), "127.0.0.1", domain=AF_INET)
       server.onConnection = proc (stream: TcpStream) =
         var message = ""
   
@@ -43,7 +43,7 @@ suite "TCP Server and Client":
         echo "       >>> server closed, coin=", $coin
 
     proc consClient() =
-      var stream = connect(Port(10000), "::1", domain=AF_INET6)
+      var stream = connect(Port(10000), "127.0.0.1", domain=AF_INET)
       var message = ""
       var coin = 0
 
