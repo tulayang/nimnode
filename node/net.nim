@@ -7,7 +7,7 @@
 ## Provides an asynchronous network wrapper. It contains functions for creating 
 ## both servers and clients (called streams). 
 
-import uv, error, streams, nettype
+import uv, error, streams, nativesockets
 
 type
   TcpServer* = ref object ## Abstraction of TCP server.
@@ -17,7 +17,11 @@ type
     maxConnections: int
     connections: int
     error: ref NodeError
+    domain: Domain
     closed: bool
+
+const INADDR_ANY* = "0.0.0.0"
+const INADDR6_ANY* = "::"
 
 proc `onConnection=`*(server: TcpServer, cb: proc (stream: TcpStream) {.closure, gcsafe.}) =
   server.connectionCb = cb
@@ -52,17 +56,28 @@ proc newTcpServer*(maxConnections = 1024): TcpServer =
   else:
     result.handle.data = cast[pointer](result)   
 
-proc bindAddr(handle: ptr Tcp, port: Port, hostname = "127.0.0.1", domain = Domain.AF_INET): cint =
+proc bindAddr(handle: ptr Tcp, port: Port, address: string, domain = Domain.AF_INET): cint =
   template condFree(exp: cint): untyped =
     if exp < 0:
       uv.freeAddrInfo(req.addrInfo)
       return exp
   var req: GetAddrInfo
-  var hints: uv.AddrInfo
-  hints.ai_family = cint(domain)
-  hints.ai_socktype = 0
-  hints.ai_protocol = 0
-  condFree getAddrInfo(getDefaultLoop(), addr(req), nil, hostname, $(int(port)), addr(hints))
+  var ai: uv.AddrInfo
+  ai.ai_family = toInt(domain)
+  ai.ai_socktype = 0
+  ai.ai_protocol = 0
+  if address == "":
+    var newAddress: string 
+    case domain
+    of AF_INET: 
+      shallowCopy(newAddress, INADDR_ANY)
+    of AF_INET6: 
+      shallowCopy(newAddress, INADDR6_ANY)
+    else:
+      condFree uv.EAI_NODATA
+    condFree getAddrInfo(getDefaultLoop(), addr(req), nil, newAddress, $(int(port)), addr(ai))
+  else:
+    condFree getAddrInfo(getDefaultLoop(), addr(req), nil, address, $(int(port)), addr(ai))
   condFree bindAddr(handle, req.addrInfo.ai_addr, cuint(0))
   uv.freeAddrInfo(req.addrInfo)
 
@@ -71,12 +86,13 @@ proc connectionCb(handle: ptr Stream, status: cint) {.cdecl.} =
   if status < 0 or server.connections >= server.maxConnections or server.connectionCb == nil:
     discard
   else:
-    var sock = accept(addr(server.handle)) do (err: ref NodeError):
+    var sock = accept(addr(server.handle), server.domain) do (err: ref NodeError):
       dec(server.connections)
     inc(server.connections)
     server.connectionCb(sock)
 
-proc serve*(server: TcpServer, port: Port, hostname = "127.0.0.1", backlog = 511, domain = Domain.AF_INET) =
+proc serve*(server: TcpServer, port: Port, hostname = "127.0.0.1",
+            domain = Domain.AF_INET, backlog = SOMAXCONN) =
   ## Start the process of listening for incoming TCP connections on the specified 
   ## ``hostname`` and ``port``. 
   ##
@@ -89,6 +105,7 @@ proc serve*(server: TcpServer, port: Port, hostname = "127.0.0.1", backlog = 511
       server.error = newNodeError(err)
       close(server)
       return
+  server.domain = domain
   cond bindAddr(addr(server.handle), port, hostname, domain)
   cond listen(cast[ptr Stream](addr(server.handle)), cint(backlog), connectionCb)
   

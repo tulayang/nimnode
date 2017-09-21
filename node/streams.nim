@@ -5,13 +5,13 @@
 #    details about the copyright. 
 
 ## This module provides an abstraction of a duplex communication based on libuv. 
-## ``DuplexStream`` is an abstract interface which provides reading and writing for 
+## ``NodeStream`` is an abstract interface which provides reading and writing for 
 ## non-blocking I/O.
 ## 
 ## There are 3 duplex implementations in the form of ``TcpStream``, ``TtyStream``, 
 ## ``PipeStream``.
 
-import uv, error, nettype
+import uv, error, nativesockets
 
 when defined(nodeBufSize):
   const BufSize* = nodeBufSize
@@ -29,7 +29,7 @@ type
     statFlowing, statReading, statReadEnded, statReadEndEmitted, 
     statWriteReady, statWriteNeedDrain, statWriting, statWriteCorked, statWriteEnded, statWriteEndEmitted
 
-  DuplexStream* = ref object of RootObj ## Abstract interface are both readable and writable. 
+  NodeStream* = ref object of RootObj ## Abstract interface are both readable and writable. 
     handle: Stream
     readBuf: array[BufSize, char]
     readBufLen: int
@@ -45,27 +45,27 @@ type
     writingCb: proc (err: ref NodeError) {.closure, gcsafe.}
     shutdown: Shutdown
     closeCb: proc (err: ref NodeError) {.closure, gcsafe.}
-    closeHookCb: proc (err: ref NodeError) {.closure, gcsafe.}
+    closeHandCb: proc (err: ref NodeError) {.closure, gcsafe.}
     error: ref NodeError
     stats: set[StreamStat]
 
-proc `onRead=`*(S: DuplexStream, cb: proc (data: pointer, size: int) {.closure, gcsafe.}) =
+proc `onRead=`*(S: NodeStream, cb: proc (data: pointer, size: int) {.closure, gcsafe.}) =
   ## Sets the callback which will be invoked when reading a chunk of data.
   S.readCb = cb
 
-proc `onReadEnd=`*(S: DuplexStream, cb: proc () {.closure, gcsafe.}) =
+proc `onReadEnd=`*(S: NodeStream, cb: proc () {.closure, gcsafe.}) =
   ## Sets the callback which will be invoked when reading the end of file.
   S.readEndCb = cb
 
-proc `onWriteDrain=`*(S: DuplexStream, cb: proc () {.closure, gcsafe.}) =
+proc `onWriteDrain=`*(S: NodeStream, cb: proc () {.closure, gcsafe.}) =
   ## Sets the callback which will be invoked when writing buffers is become empty from large than ``WriteOverLevel``.
   S.writeDrainCb = cb
 
-proc `onWriteEnd=`*(S: DuplexStream, cb: proc () {.closure, gcsafe.}) =
+proc `onWriteEnd=`*(S: NodeStream, cb: proc () {.closure, gcsafe.}) =
   ## Sets the callback which will be invoked when the write side is shutdowned.
   S.writeEndCb = cb
 
-proc `onClose=`*(S: DuplexStream, cb: proc (err: ref NodeError) {.closure, gcsafe.}) =
+proc `onClose=`*(S: NodeStream, cb: proc (err: ref NodeError) {.closure, gcsafe.}) =
   ## Sets the callback which will be invoked when the stream is closed. If an error occurs, the callback will
   ##  be called with the error as its first argument.
   S.closeCb = cb
@@ -73,10 +73,10 @@ proc `onClose=`*(S: DuplexStream, cb: proc (err: ref NodeError) {.closure, gcsaf
 template offsetChar(x: pointer, i: int): pointer =
   cast[pointer](cast[ByteAddress](x) + i * sizeof(char))
 
-proc clearRead(S: DuplexStream) =
+proc clearRead(S: NodeStream) =
   S.readBufLen = 0
 
-proc clearWrite(S: DuplexStream) =
+proc clearWrite(S: NodeStream) =
   # if there is writing request
   if S.writingCb != nil:
     S.writingCb(S.error)
@@ -92,25 +92,25 @@ proc clearWrite(S: DuplexStream) =
   S.writingSize = 0
 
 proc closeCb(handle: ptr Handle) {.cdecl.} =
-  var S = cast[DuplexStream](handle.data)
+  var S = cast[NodeStream](handle.data)
   GC_unref(S)
-  clearRead(S)
-  clearWrite(S)
-  if S.closeHookCb != nil:
-    S.closeHookCb(S.error)
+  if S.closeHandCb != nil:
+    S.closeHandCb(S.error)
   if S.closeCb != nil:
     S.closeCb(S.error)
   elif S.error != nil:
     raise S.error
 
-proc close*(S: DuplexStream) =
+proc close*(S: NodeStream) =
   ## Close ``S``. Handles that wrap file descriptors are closed immediately.
   if statClosed notin S.stats:
     incl(S.stats, statClosed)
+    clearRead(S)
+    clearWrite(S)
     close(cast[ptr Handle](addr(S.handle)), closeCb)
 
 proc shutdownCb(req: ptr Shutdown, status: cint) {.cdecl.} =
-  let S = cast[DuplexStream](cast[ptr Stream](req.handle).data) 
+  let S = cast[NodeStream](cast[ptr Stream](req.handle).data) 
   incl(S.stats, statWriteEndEmitted)
   let err = status
   if err < 0:
@@ -122,9 +122,9 @@ proc shutdownCb(req: ptr Shutdown, status: cint) {.cdecl.} =
     if statWaitingClosed in S.stats or statReadEndEmitted in S.stats:
       close(S)
 
-proc doClearBuf(S: DuplexStream): cint {.gcsafe.}
+proc doClearBuf(S: NodeStream): cint {.gcsafe.}
 
-proc writeEnd*(S: DuplexStream) = 
+proc writeEnd*(S: NodeStream) = 
   ## Shutdown the outgoing (write) side and waits for all pending write requests to complete.
   if statClosed     notin S.stats and 
      statWriteEnded notin S.stats: 
@@ -146,7 +146,7 @@ proc writeEnd*(S: DuplexStream) =
       S.error = newNodeError(err)
       close(S)
 
-proc closeSoon*(S: DuplexStream) = 
+proc closeSoon*(S: NodeStream) = 
   ## Shutdown the outgoing (write) side and waits for all pending write requests to complete.
   ## After that, close ``S``.
   if statClosed  notin S.stats and 
@@ -161,7 +161,7 @@ proc closeSoon*(S: DuplexStream) =
     assert statWriteEnded in S.stats
 
 proc writingCb(req: ptr Write, status: cint) {.cdecl.} =
-  let S = cast[DuplexStream](cast[ptr Stream](req.handle).data) 
+  let S = cast[NodeStream](cast[ptr Stream](req.handle).data) 
   if status < 0:
     S.error = newNodeError(status)
     close(S)
@@ -185,7 +185,7 @@ proc writingCb(req: ptr Write, status: cint) {.cdecl.} =
     else:
       excl(S.stats, statWriting)
 
-proc doWriteData(S: DuplexStream, buf: pointer, size: int, 
+proc doWriteData(S: NodeStream, buf: pointer, size: int, 
                  cb: proc (err: ref NodeError) {.closure, gcsafe.}): cint =
   var buffer = Buffer()
   buffer.base = buf
@@ -196,7 +196,7 @@ proc doWriteData(S: DuplexStream, buf: pointer, size: int,
   result = write(addr(S.writingReq), cast[ptr Stream](addr(S.handle)), 
                  addr(buffer), 1, writingCb)
 
-proc doWriteBuf(S: DuplexStream): cint =
+proc doWriteBuf(S: NodeStream): cint =
   assert S.writeBufLen > 1
   let n = S.writeBufLen
   var writingSize = 0
@@ -224,7 +224,7 @@ proc doWriteBuf(S: DuplexStream): cint =
       dealloc(bufs)
     S.writingSize = writingSize
 
-proc doClearBuf(S: DuplexStream): cint =
+proc doClearBuf(S: NodeStream): cint =
   assert S.writeBufLen > 0
   if S.writeBufLen == 1:
     let err = doWriteData(S, S.writeBuf[0].base, 
@@ -239,7 +239,7 @@ proc doClearBuf(S: DuplexStream): cint =
   S.writeBufLen = 0
   return 0
 
-proc addWriteBuf(S: DuplexStream, buf: pointer, size: int, 
+proc addWriteBuf(S: NodeStream, buf: pointer, size: int, 
                  cb: proc (err: ref NodeError) {.closure, gcsafe.}) =
   add(S.writeBuf, (base: buf, length: size, cb: cb))
   inc(S.writeBufLen)
@@ -247,7 +247,7 @@ proc addWriteBuf(S: DuplexStream, buf: pointer, size: int,
   if S.writeQueueSize >= WriteOverLevel:
     incl(S.stats, statWriteNeedDrain)
 
-proc write*(S: DuplexStream, buf: pointer, size: int, 
+proc write*(S: NodeStream, buf: pointer, size: int, 
             cb: proc (err: ref NodeError) {.closure, gcsafe.} = nil) =
   ## Writes data to the underlying system, and calls the supplied callback once the data has been fully 
   ## handled. If an error occurs, the callback will be called with the error as its first argument.
@@ -273,7 +273,7 @@ proc write*(S: DuplexStream, buf: pointer, size: int,
       if S.writeQueueSize >= WriteOverLevel:
         incl(S.stats, statWriteNeedDrain)
 
-proc write*(S: DuplexStream, buf: string, 
+proc write*(S: NodeStream, buf: string, 
             cb: proc (err: ref NodeError) {.closure, gcsafe.} = nil) =
   ## Writes data to the underlying system, and calls the supplied callback once the data has been fully 
   ## handled. If an error occurs, the callback will be called with the error as its first argument.
@@ -283,13 +283,13 @@ proc write*(S: DuplexStream, buf: string,
     if cb != nil:
       cb(err)
 
-proc writeCork*(S: DuplexStream) =
+proc writeCork*(S: NodeStream) =
   ## Forces buffering of all writes.
   ## 
   ## Buffered data will be flushed either at ``writeUncork()`` or at ``writeEnd()`` call.
   incl(S.stats, statWriteCorked)
 
-proc writeUncork*(S: DuplexStream) = 
+proc writeUncork*(S: NodeStream) = 
   ## Flush all data, buffered since ``writeCork()`` call.
   if statWriteCorked in S.stats:
     excl(S.stats, statWriteCorked)
@@ -306,7 +306,7 @@ proc writeUncork*(S: DuplexStream) =
         incl(S.stats, statWriting)
 
 proc allocCb(handle: ptr Handle, size: csize, buf: ptr Buffer) {.cdecl.} =
-  let S = cast[DuplexStream](handle.data)
+  let S = cast[NodeStream](handle.data)
   if statFlowing in S.stats:
     buf.base = S.readBuf[0].addr
     buf.length = BufSize
@@ -314,7 +314,7 @@ proc allocCb(handle: ptr Handle, size: csize, buf: ptr Buffer) {.cdecl.} =
     buf.base = offsetChar(S.readBuf[0].addr, S.readBufLen) 
     buf.length = BufSize - S.readBufLen
 
-proc readOnEnd(S: DuplexStream) =
+proc readOnEnd(S: NodeStream) =
   incl(S.stats, statReadEnded)
   if statFlowing in S.stats:
     incl(S.stats, statReadEndEmitted)
@@ -323,7 +323,7 @@ proc readOnEnd(S: DuplexStream) =
     if statWriteEndEmitted in S.stats:
       close(S)
 
-proc readOnData(S: DuplexStream, size: int) =
+proc readOnData(S: NodeStream, size: int) =
   if statFlowing in S.stats:
     if S.readCb != nil:
       S.readCb(addr(S.readBuf[0]), size)
@@ -340,7 +340,7 @@ proc readOnData(S: DuplexStream, size: int) =
 proc readCb(handle: ptr Stream, nread: cssize, buf: ptr Buffer) {.cdecl.} =
   if nread == 0: # EINTR or EAGAIN or EWOULDBLOCK
     return
-  let S = cast[DuplexStream](handle.data)
+  let S = cast[NodeStream](handle.data)
   if nread < 0:
     if cint(nread) == uv.EOF:
       readOnEnd(S)
@@ -350,7 +350,7 @@ proc readCb(handle: ptr Stream, nread: cssize, buf: ptr Buffer) {.cdecl.} =
   else:
     readOnData(S, int(cint(nread)))
 
-proc readResume*(S: DuplexStream) =
+proc readResume*(S: NodeStream) =
   ## Switchs ``S`` into flowing mode, data is read from the underlying 
   ## system and provided to your program as fast as possible. 
   if statFlowing notin S.stats:
@@ -378,26 +378,28 @@ proc readResume*(S: DuplexStream) =
                 S.readCb(addr(S.readBuf[0]), S.readBufLen)
               S.readBufLen = 0  
 
-proc readPause*(S: DuplexStream) =
+proc readPause*(S: NodeStream) =
   ## Switchs ``S`` into paused mode, any data that becomes available
   ## will remain in the internal buffer.
   excl(S.stats, statFlowing)
 
-proc isFlowing*(S: DuplexStream): bool =
+proc isFlowing*(S: NodeStream): bool =
+  ## Checks whether or not the stream ``S`` is in flowing mod.
   result = statFlowing in S.stats
 
-proc isNeedDrain*(S: DuplexStream): bool =
+proc isNeedDrain*(S: NodeStream): bool =
+  ## When writes to ``S``, the data may be buffered internally, so it is best not to write
+  ## excessively. If the buffered memory overflow the inner boundary, this proc returns ``true``.
   result = statWriteNeedDrain in S.stats
 
-proc failed*(S: DuplexStream): bool = 
+proc isFailed*(S: NodeStream): bool = 
+  ## Checks if ``S`` has an internal error.
   result = S.error != nil
 
-proc error*(S: DuplexStream): ref NodeError = 
-  result = S.error
-
 type
-  TcpStream* = ref object of DuplexStream ## Abstraction of TCP communication based on stream IO manner. 
+  TcpStream* = ref object of NodeStream ## Abstraction of TCP communication based on stream IO manner. 
     connectCb: proc () {.closure, gcsafe.}
+    domain: Domain
 
 proc newTcpStream(): TcpStream =
   ## Create a new TCP connection.
@@ -416,6 +418,84 @@ proc `onConnect=`*(S: TcpStream, cb: proc () {.closure, gcsafe.}) =
   ## Sets the callback which will be invoked when connecting successfuly. 
   S.connectCb = cb
 
+proc toIp4Name(sa: ptr SockAddrIn): string = 
+  result = newString(16) # 3 * 4 + 3
+  let err = toIp4Name(sa, result, 16)
+  if err < 0:
+    raise newNodeError(err)
+  setLen(result, result.cstring.len)
+
+proc toIp6Name(sa: ptr SockAddrIn6): string = 
+  result = newString(40) # 4 * 8 + 7
+  let err = toIp6Name(sa, result, 40)
+  if err < 0:
+    raise newNodeError(err)
+  setLen(result, result.cstring.len)
+
+proc getLocalAddr*(S: TcpStream): 
+    tuple[domain: Domain, address: string, port: Port] = 
+  ## Get the local address infomation.   
+  case S.domain
+  of Domain.AF_INET:
+    var sa: SockAddrIn
+    var saLen = sizeof(SockAddrIn).cint
+    let err = getSockName(cast[ptr Tcp](S.handle.addr), cast[ptr SockAddr](sa.addr), saLen)
+    if err < 0:
+      raise newNodeError(err)
+    result.address = toIp4Name(sa.addr)
+    result.domain = Domain.AF_INET
+    result.port = Port(nativesockets.ntohs((sa.sin_port)))
+  of Domain.AF_INET6:
+    var sa: SockAddrIn6
+    var saLen = sizeof(SockAddrIn6).cint
+    let err = getSockName(cast[ptr Tcp](S.handle.addr), cast[ptr SockAddr](sa.addr), saLen)
+    if err < 0:
+      raise newNodeError(err)
+    result.address = toIp6Name(sa.addr)
+    result.domain = Domain.AF_INET
+    result.port = Port(nativesockets.ntohs((sa.sin6_port)))
+  else:
+    raise newNodeError(uv.EAI_ADDRFAMILY)
+
+proc getPeerAddr*(S: TcpStream): 
+    tuple[domain: Domain, address: string, port: Port] = 
+  ## Get the peer address infomation.   
+  case S.domain
+  of Domain.AF_INET:
+    var sa: SockAddrIn
+    var saLen = sizeof(SockAddrIn).cint
+    let err = getPeerName(cast[ptr Tcp](S.handle.addr), cast[ptr SockAddr](sa.addr), saLen)
+    if err < 0:
+      raise newNodeError(err)
+    result.address = toIp4Name(sa.addr)
+    result.domain = Domain.AF_INET
+    result.port = Port(nativesockets.ntohs((sa.sin_port)))
+  of Domain.AF_INET6:
+    var sa: SockAddrIn6
+    var saLen = sizeof(SockAddrIn6).cint
+    let err = getPeerName(cast[ptr Tcp](S.handle.addr), cast[ptr SockAddr](sa.addr), saLen)
+    if err < 0:
+      raise newNodeError(err)
+    result.address = toIp6Name(sa.addr)
+    result.domain = Domain.AF_INET
+    result.port = Port(nativesockets.ntohs((sa.sin6_port)))
+  else:
+    raise newNodeError(uv.EAI_ADDRFAMILY)
+
+proc setNoDelay*(S: TcpStream, enable: bool) =
+  ## Disables the Nagle algorithm. By default TCP connections use the 
+  ## Nagle algorithm, they buffer data before sending it off.
+  let err = setNoDelay(cast[ptr Tcp](S.handle.addr), if enable: 1 else: 0)
+  if err < 0:
+    raise newNodeError(err)
+
+proc setKeepAlive*(S: TcpStream, enable: bool, delay: cuint) =
+  ## Enable / disable TCP keep-alive. delay is the initial delay in seconds, ignored when 
+  ## enable is ``false``.
+  let err = setKeepAlive(cast[ptr Tcp](S.handle.addr), if enable: 1 else: 0, delay)
+  if err < 0:
+    raise newNodeError(err)
+
 proc connectCb(req: ptr Connect, status: cint) {.cdecl.} =
   let S = cast[TcpStream](req.data)
   dealloc(req)
@@ -427,38 +507,40 @@ proc connectCb(req: ptr Connect, status: cint) {.cdecl.} =
     if S.connectCb != nil:
       S.connectCb()
 
-proc connect*(port: Port, hostname = "127.0.0.1", domain = Domain.AF_INET): TcpStream =
+proc connect*(port: Port, address = "127.0.0.1", domain = Domain.AF_INET): TcpStream =
   ## Establishs an IPv4 or IPv6 TCP connection and returns a fresh ``TcpStream``.
   template condFree(exp: untyped): untyped =
     let err = exp
     if err < 0:
-      uv.freeAddrInfo(addrReq.addrInfo)
-      dealloc(connectReqPtr)
+      uv.freeAddrInfo(reqGetAI.addrInfo)
+      dealloc(reqConn)
       result.error = newNodeError(err)
       close(result)
       return
   result = newTcpStream()
-  if not result.failed:
-    var connectReqPtr = cast[ptr Connect](alloc0(sizeof(Connect)))
-    var addrReq: GetAddrInfo
-    var hints: uv.AddrInfo
-    hints.ai_family = cint(domain)
-    hints.ai_socktype = 0
-    hints.ai_protocol = 0
-    condFree getAddrInfo(getDefaultLoop(), addr(addrReq), nil, 
-                         hostname, $(int(port)), addr(hints))
-    connectReqPtr.data = cast[pointer](result)
-    condFree connect(connectReqPtr, cast[ptr Tcp](addr(result.handle)),
-                     addrReq.addrInfo.ai_addr, connectCb)
-    uv.freeAddrInfo(addrReq.addrInfo) 
+  result.domain = domain
+  if not result.isFailed:
+    var reqConn = cast[ptr Connect](alloc0(sizeof(Connect)))
+    var reqGetAI: GetAddrInfo
+    var ai: uv.AddrInfo
+    ai.ai_family = toInt(domain)
+    ai.ai_socktype = 0
+    ai.ai_protocol = 0
+    condFree getAddrInfo(getDefaultLoop(), addr(reqGetAI), nil, 
+                         address, $(int(port)), addr(ai))
+    reqConn.data = cast[pointer](result)
+    condFree connect(reqConn, cast[ptr Tcp](addr(result.handle)),
+                     reqGetAI.addrInfo.ai_addr, connectCb)
+    uv.freeAddrInfo(reqGetAI.addrInfo) 
     readResume(result) 
 
-proc accept*(server: ptr Tcp, 
-             closeCb: proc (err: ref NodeError) {.closure, gcsafe.} = nil): TcpStream = 
+proc accept*(server: ptr Tcp, domain = Domain.AF_INET, 
+             closeHandCb: proc (err: ref NodeError) {.closure, gcsafe.} = nil): TcpStream = 
   ## Accept incoming connections, returns a new ``TcpStream`` which is a wrapper of a connection.
   result = newTcpStream()
-  result.closeHookCb = closeCb
-  if not result.failed:
+  result.domain = domain
+  result.closeHandCb = closeHandCb
+  if not result.isFailed:
     let err = accept(cast[ptr Stream](server), cast[ptr Stream](addr(result.handle)))
     if err < 0:
       result.error = newNodeError(err)

@@ -4,14 +4,14 @@
 #    See the file "LICENSE", included in this distribution, for
 #    details about the copyright.
 
-import unittest, node
+import unittest, node, nativesockets
 
 suite "TCP Server and Client":
   test "closeSoon to close read and write; close auto when writeEnded and readEnded":
     proc consServer() =
       var server = newTcpServer()
       var coin = 0
-      server.serve(Port(10000), "localhost")
+      server.serve(Port(10000), "::1", domain=AF_INET6)
       server.onConnection = proc (stream: TcpStream) =
         var message = ""
   
@@ -37,11 +37,13 @@ suite "TCP Server and Client":
           close(server)
 
       server.onClose = proc (err: ref NodeError) =
+        if err != nil:
+          echo "Server Error: ", err.msg
         check coin == 3
         echo "       >>> server closed, coin=", $coin
 
     proc consClient() =
-      var stream = connect(Port(10000), "localhost")
+      var stream = connect(Port(10000), "::1", domain=AF_INET6)
       var message = ""
       var coin = 0
 
@@ -66,6 +68,8 @@ suite "TCP Server and Client":
         inc(coin)
 
       stream.onClose = proc (err: ref NodeError) =
+        if err != nil:
+          echo "Client Error: ", err.msg
         check err == nil
         check coin == 3
         echo "       >>> client closed, coin=", $coin

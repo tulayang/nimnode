@@ -11,7 +11,7 @@
 
 when defined(windows):
   import winlean
-  export SockAddrIn, SockAddrIn6, SockAddr, AddrInfo, AF_INET, AF_INET6
+  export SockAddrIn, SockAddrIn6, SockAddr, AddrInfo
 
   type
     Buffer* {.pure, final, importc: "uv_buf_t", header: "uv.h".} = object ## Buffer data type.
@@ -21,11 +21,9 @@ when defined(windows):
     SocketHandle* = winlean.SocketHandle ## Cross platform representation of a socket handle.
     FD* = winlean.Handle ## Abstract representation of a file descriptor.
     cssize* = int ## This is the same as the type ``ssize_t`` in C.
-    Sockaddr_storage* {.pure, final, importc: "SOCKADDR_STORAGE", header: "winsock2.h".} = object
-      ss_family*: cint
 else:
   import posix
-  export SockAddrIn, SockAddrIn6, SockAddr, AddrInfo, AF_INET, AF_INET6
+  export SockAddrIn, SockAddrIn6, SockAddr, AddrInfo
 
   type
     Buffer* {.pure, final, importc: "uv_buf_t", header: "uv.h".} = object ## Buffer data type.
