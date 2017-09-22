@@ -89,6 +89,7 @@ type
     EHOSTDOWN = "host is down"
     UNKNOWNSYS = "unknown system error"
     END_WREND = "write after end"
+    END_BADREQ = "bad Request"
 
   NodeError* = object of Exception ## Raised if a specific operation failed.
     errorCode*: NodeErrorCode 

@@ -28,6 +28,7 @@ type
     writeEndCb: proc () {.closure, gcsafe.} ## 当关闭 outgoing，底层所有的数据发送完毕时触发
     ## 和 nodejs 不同，nimnode 提供灵活，而不过多的参与逻辑规则 
     closeCb: proc (err: ref NodeError) {.closure, gcsafe.}
+    parsing: bool
 
   HttpServer* = ref object ## HTTP s object.
     base: TcpServer
@@ -62,6 +63,7 @@ proc newHttpServerStream(t: TcpStream, lineLimit = 1024, headerLimit = 1024): Ht
   new(result)
   result.base = t
   result.parser = initRequestParser(lineLimit, headerLimit)
+  result.parsing = false
 
 proc close*(h: HttpServerStream) =
   ## Close stream ``h``. Handles that wrap file descriptors are closed immediately.
@@ -133,6 +135,7 @@ proc `onClose=`*(s: HttpServer, cb: proc (err: ref NodeError) {.closure, gcsafe.
   s.closeCb = cb
 
 proc newHttpServer*(maxConnections = 1024, lineLimit = 1024, headerLimit = 1024): HttpServer =
+  ## Creates a new Http Server.
   new(result)
   let s = result
   s.base = newTcpServer(maxConnections)
@@ -146,19 +149,33 @@ proc newHttpServer*(maxConnections = 1024, lineLimit = 1024, headerLimit = 1024)
       for state in h.parser.parse(data, size):
         case state
         of statReqError:
-          h.error = newNodeError(UNKNOWNSYS) # TODO 更详细的错误
+          h.error = newNodeError(END_BADREQ) 
           write(t, "HTTP/1.1 400 Bad Request\c\L\c\L") 
           readPause(t)
           closeSoon(t)
         of statReqExpect100Continue:
+          parsing = false
           write(t, "HTTP/1.1 100 Continue\c\L\c\L")
-          # TODO 重置 parser，对方剩余的数据应该作为下一次的请求
+          # 客户端发送 100 Continue 的请求不能包含请求体，否则，
+          # 服务器仍然解析请求体，但是会引发逻辑错误
         of statReqExceptOther:
           write(t, "HTTP/1.1 417 Expectation Failed\c\L\c\L") 
           readPause(t)
           closeSoon(t)
         of statReqUpgrade:
-          discard # TODO 更多研究 
+          discard # TODO 更多研究
+          # 我想让 Http Server 和 Http Upgrade Server 独立，
+          # 处理 Upgrade 的 Http Server 不接受其他请求，这样可以使得服务器的模型更简单
+          # 以下是 Upgrade 的处理： 
+          #    删除所有 TcpStream 的挂载回调函数，由用户来控制转变为完全的 socket 通信
+          # if h.upgradeCb != nil:
+          #   t.onRead = nil
+          #   t.onReadEnd = nil
+          #   t.onWriteDrain = nil
+          #   t.onWriteEnd = nil
+          #   t.onClose = nil
+          #   let (offset, size) = getRemainPacket(h.parser)
+          #   h.upgradeCb(t, offsetChar(data, offset), size)
         of statReqHead:
           if s.requestCb != nil:
             s.requestCb(h) 
@@ -169,18 +186,17 @@ proc newHttpServer*(maxConnections = 1024, lineLimit = 1024, headerLimit = 1024)
         of statReqDataChunked:
           discard # h.readChunked() 表示读取完毕一块 chunked 数据，对于 docker 以 JSON 作为 chunked 数据很有用
         of statReqDataEnd:
+          parsing = false
           if h.readEndCb != nil:
             h.readEndCb()
           # keep-alive ?
-          # TODO RequestParser 支持 clear / reset 重用内存
 
     t.onReadEnd = proc () = 
       # 如果正在解析 ... ，那么这应该是一个错误
       # 否则，则为正确关闭
-      # TODO
-      # if not t.parser.finished:
-      #   write(t, "HTTP/1.1 400 Bad Request\c\L\c\L") 
-      closeSoon(t) # TODO 发送错误消息
+      if h.parsing:
+        write(t, "HTTP/1.1 400 Bad Request\c\L\c\L") 
+      closeSoon(t) 
 
     t.onWriteDrain = proc () =
       if h.writeDrainCb != nil:
@@ -192,7 +208,7 @@ proc newHttpServer*(maxConnections = 1024, lineLimit = 1024, headerLimit = 1024)
 
     t.onClose = proc (err: ref NodeError) = 
       if h.closeCb != nil:
-        h.closeCb(if h.error != nil: h.error else: err) # TODO 报告错误消息 
+        h.closeCb(if h.error != nil: h.error else: err) 
       # HTTP 服务器，我想让其安全运行，即便用户没有提供错误检查函数
       # elif h.error != nil:
       #   raise h.error
