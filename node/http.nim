@@ -154,7 +154,7 @@ proc newHttpServer*(maxConnections = 1024, lineLimit = 1024, headerLimit = 1024)
           readPause(t)
           closeSoon(t)
         of statReqExpect100Continue:
-          parsing = false
+          h.parsing = false
           write(t, "HTTP/1.1 100 Continue\c\L\c\L")
           # 客户端发送 100 Continue 的请求不能包含请求体，否则，
           # 服务器仍然解析请求体，但是会引发逻辑错误
@@ -186,7 +186,7 @@ proc newHttpServer*(maxConnections = 1024, lineLimit = 1024, headerLimit = 1024)
         of statReqDataChunked:
           discard # h.readChunked() 表示读取完毕一块 chunked 数据，对于 docker 以 JSON 作为 chunked 数据很有用
         of statReqDataEnd:
-          parsing = false
+          h.parsing = false
           if h.readEndCb != nil:
             h.readEndCb()
           # keep-alive ?

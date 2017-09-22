@@ -27,6 +27,7 @@ install:
   - ./koch nimble
   - export PATH=$(pwd)/bin:$PATH
   - cd ..
+  - nimble install httpkit
   #- if [[ $TRAVIS_OS_NAME == 'osx' ]]; then rvm get head; fi # fix osx ``shell_session_update: command not found``
 
 script:
