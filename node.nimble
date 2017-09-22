@@ -6,4 +6,4 @@ license = "MIT"
 skipFiles = @["TODO.md"]
 
 # Dependencies
-requires "nim >= 0.17.1"
+requires "nim >= 0.17.1", "httpkit >= 0.1.0"

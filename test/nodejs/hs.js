@@ -19,11 +19,17 @@ var srv = http.createServer((req, res) => {
   console.log('request ...')
   req.setEncoding('utf8')
   req.on('data', (d) => {
-    console.log('data: %j', d)
-    req.pause()
-    setTimeout(() => {
-      req.resume()
-    }, 1000)
+    console.log('----------------------------------------------')
+    console.log(Buffer.byteLength(d))
+    var data = ""
+    data += Buffer.byteLength(d) + '\n'
+    data += d + '\n'
+    data += '----------------------------------------------\n'
+    require('fs').appendFileSync('./log', data, 'utf-8')
+    // req.pause()
+    // setTimeout(() => {
+    //   req.resume()
+    // }, 1000)
   })
   req.on('end', () => {
     console.log('data: end')

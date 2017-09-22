@@ -11,8 +11,7 @@ var req1 = require('http').request({
   path: '/',
   method: 'Post',
   headers: {
-    "Content-Length": "1",
-    "Expect": "200-continue"
+    "Transfer-Encoding": "chunked"
   },
   // agent: keepAliveAgent
 }, (res) => {
@@ -31,7 +30,10 @@ var req1 = require('http').request({
 req1.on('error', (e) => {
   console.log("req1 error:", e)
 })
-req1.end('a')
+var data = require('fs').readFileSync('./a.txt', 'utf-8')
+console.log(Buffer.byteLength(data))
+req1.write(data)
+
 // console.log(keepAliveAgent.sockets)
 // var req2 = require('http').request({
 //   hostname: '127.0.0.1',

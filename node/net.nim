@@ -20,8 +20,8 @@ type
     domain: Domain
     closed: bool
 
-const INADDR_ANY* = "0.0.0.0"
-const INADDR6_ANY* = "::"
+const InAddrAny* = "0.0.0.0"
+const InAddr6Any* = "::"
 
 proc `onConnection=`*(server: TcpServer, cb: proc (stream: TcpStream) {.closure, gcsafe.}) =
   server.connectionCb = cb
@@ -70,9 +70,9 @@ proc bindAddr(handle: ptr Tcp, port: Port, address: string, domain = Domain.AF_I
     var newAddress: string 
     case domain
     of AF_INET: 
-      shallowCopy(newAddress, INADDR_ANY)
+      shallowCopy(newAddress, InAddrAny)
     of AF_INET6: 
-      shallowCopy(newAddress, INADDR6_ANY)
+      shallowCopy(newAddress, InAddr6Any)
     else:
       condFree uv.EAI_NODATA
     condFree getAddrInfo(getDefaultLoop(), addr(req), nil, newAddress, $(int(port)), addr(ai))
@@ -91,10 +91,10 @@ proc connectionCb(handle: ptr Stream, status: cint) {.cdecl.} =
     inc(server.connections)
     server.connectionCb(sock)
 
-proc serve*(server: TcpServer, port: Port, hostname = "127.0.0.1",
+proc serve*(server: TcpServer, port: Port, address = "127.0.0.1",
             domain = Domain.AF_INET, backlog = SOMAXCONN) =
   ## Start the process of listening for incoming TCP connections on the specified 
-  ## ``hostname`` and ``port``. 
+  ## ``address`` and ``port``. 
   ##
   ## ``backlog`` specifies the length of the queue for pending connections. When the 
   ## queue fills, new clients attempting to connect fail with ECONNREFUSED until the 
@@ -106,7 +106,7 @@ proc serve*(server: TcpServer, port: Port, hostname = "127.0.0.1",
       close(server)
       return
   server.domain = domain
-  cond bindAddr(addr(server.handle), port, hostname, domain)
+  cond bindAddr(addr(server.handle), port, address, domain)
   cond listen(cast[ptr Stream](addr(server.handle)), cint(backlog), connectionCb)
   
 
