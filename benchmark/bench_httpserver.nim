@@ -9,7 +9,7 @@ import unittest, node, nativesockets, strtabs
 proc consServer() =
   var server = newHttpServer(1_024_000)
   serve(server, Port(10000))
-  server.onRequest = proc (stream: HttpStream) =
+  server.onRequest = proc (stream: HttpServerStream) =
     stream.writeCork()
     stream.writeHead(200, newStringTable({
       "Content-Length": "11"
