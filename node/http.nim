@@ -15,7 +15,7 @@
 # 请求头、响应头应该怎么存储？ 每一次 request 都会刷新重置它们！所以，好的简单的处理方式是
 # 和 HttpServerStream 绑定？
 
-import uv, error, streams, net, nativesockets, httpkit, strtabs
+import uv, error, streams, net, nativesockets, httpkit, strtabs, httpbuf
 
 type
   HttpServerStream* = ref object ##　服务端的 Http 流，每当有一个新的连接时，就同时在内部创建一个 Http 流
@@ -99,6 +99,86 @@ proc write*(h: HttpServerStream, buf: string,
             cb: proc (err: ref NodeError) {.closure, gcsafe.} = nil) =
   write(h.base, buf, cb)
 
+proc toChunkSize*(x: BiggestInt): string =
+  assert x >= 0
+  const HexChars = "0123456789ABCDEF"
+  var n = x
+  var m = 0
+  var s = newString(5) # sizeof(BiggestInt) * 10 / 16
+  for j in countdown(4, 0):
+    s[j] = HexChars[n and 0xF]
+    n = n shr 4
+    inc(m)
+    if n == 0: 
+      break
+  result = newStringOfCap(m)
+  for i in 5-m..<5:
+    add(result, s[i])
+
+proc writeChunk*(h: HttpServerStream, buf: pointer, size: int, 
+                 cb: proc (err: ref NodeError) {.closure, gcsafe.} = nil) =
+  let head = toChunkSize(size)
+  let tail = "\c\L"
+  writeCork(h.base)
+  write(h.base, head)
+  write(h.base, tail)
+  write(h.base, buf, size)
+  write(h.base, tail, cb)
+  writeUncork(h.base)
+
+proc writeChunk*(h: HttpServerStream, statusCode: int, headers: StringTableRef, buf: string, 
+                 cb: proc (err: ref NodeError) {.closure, gcsafe.} = nil) =
+  ## Writes some data to the underlying system, and calls the supplied callback once the data has
+  ## been fully handled. The data will be encoded for "Transfer-Encoding: chunked".
+  var s = "HTTP/1.1 " & $statusCode & " OK\r\L"
+  for key,value in pairs(headers):
+    add(s, key & ": " & value & "\r\L")
+  add(s, "\r\L")
+
+  let head = toChunkSize(buf.len)
+  let tail = "\c\L"
+  var m = newString(s.len + head.len + 2 + buf.len + 2)
+  copyMem(offsetChar(m.cstring, 0), s.cstring, s.len)
+  copyMem(offsetChar(m.cstring, s.len), head.cstring, head.len)
+  copyMem(offsetChar(m.cstring, s.len + head.len), tail.cstring, 2)
+  copyMem(offsetChar(m.cstring, s.len + head.len + 2), buf.cstring, buf.len)
+  copyMem(offsetChar(m.cstring, s.len + head.len + 2 + buf.len), tail.cstring, 2)
+  write(h.base, m)
+
+proc writeChunk*(h: HttpServerStream, buf: string, 
+                 cb: proc (err: ref NodeError) {.closure, gcsafe.} = nil) =
+  ## Writes some data to the underlying system, and calls the supplied callback once the data has
+  ## been fully handled. The data will be encoded for "Transfer-Encoding: chunked".
+  let head = toChunkSize(buf.len)
+  let tail = "\c\L"
+  var m = newString(head.len + 2 + buf.len + 2)
+  copyMem(offsetChar(m.cstring, 0), head.cstring, head.len)
+  copyMem(offsetChar(m.cstring, head.len), tail.cstring, 2)
+  copyMem(offsetChar(m.cstring, head.len + 2), buf.cstring, buf.len)
+  copyMem(offsetChar(m.cstring, head.len + 2 + buf.len), tail.cstring, 2)
+  write(h.base, m)
+  # writeCork(h.base)
+  # write(h.base, head)
+  # write(h.base, tail)
+  # write(h.base, buf)
+  # write(h.base, tail, cb)
+  # writeUncork(h.base)
+
+proc writeChunkTail*(h: HttpServerStream, 
+                     cb: proc (err: ref NodeError) {.closure, gcsafe.} = nil) =
+  ## Writes the end tail for "Transfer-Encoding: chunked".
+  let tail = "0\c\L\c\L"
+  write(h.base, tail, cb)
+
+proc write*(h: HttpServerStream, buf: httpbuf.HttpBuffer, 
+            cb: proc (err: ref NodeError) {.closure, gcsafe.} = nil) =
+  
+  GC_ref(buf.base)
+  write(h.base, buf.base.cstring, buf.length) do (err: ref NodeError):
+    GC_unref(buf.base)
+    if cb != nil:
+      cb(err)
+    
 proc writeCork*(h: HttpServerStream) =
   writeCork(h.base)
 
@@ -125,8 +205,6 @@ proc request*(h: HttpServerStream): tuple[
 ] =
   # TODO 优化，深 copy 转为浅 copy
   getHead(h.parser)
-
-# TODO chunked string
 
 proc `onRequest=`*(s: HttpServer, cb: proc (stream: HttpServerStream) {.closure, gcsafe.}) =
   s.requestCb = cb

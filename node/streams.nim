@@ -27,7 +27,7 @@ type
   StreamStat = enum   
     statClosed, statWaitingClosed, 
     statFlowing, statReading, statReadEnded, statReadEndEmitted, 
-    statWriteReady, statWriteNeedDrain, statWriting, statWriteCorked, statWriteEnded, statWriteEndEmitted
+    statWriteReady, statWriteNeedDrain, statWriting, statWriteEnded, statWriteEndEmitted
 
   NodeStream* = ref object of RootObj ## Abstract interface are both readable and writable. 
     handle: Stream
@@ -38,6 +38,7 @@ type
     writeBuf: seq[tuple[base: pointer, length: int, cb: proc (err: ref NodeError) {.closure, gcsafe.}]]
     writeBufLen: int
     writeQueueSize: int
+    writeCorks: int
     writeDrainCb: proc () {.closure, gcsafe.}
     writeEndCb: proc () {.closure, gcsafe.}
     writingReq: Write
@@ -90,6 +91,7 @@ proc clearWrite(S: NodeStream) =
   S.writeBufLen = 0
   S.writeQueueSize = 0
   S.writingSize = 0
+  S.writeCorks = 0
 
 proc closeCb(handle: ptr Handle) {.cdecl.} =
   var S = cast[NodeStream](handle.data)
@@ -129,8 +131,8 @@ proc writeEnd*(S: NodeStream) =
   if statClosed     notin S.stats and 
      statWriteEnded notin S.stats: 
     incl(S.stats, statWriteEnded)
-    if statWriteCorked in S.stats:
-      excl(S.stats, statWriteCorked)
+    if S.writeCorks > 0:
+      S.writeCorks = 0 # Remove the cork, write out all
     if statWriteReady in    S.stats and 
        statWriting    notin S.stats and 
        S.writeBufLen > 0:
@@ -177,7 +179,7 @@ proc writingCb(req: ptr Write, status: cint) {.cdecl.} =
     if S.writingCb != nil:
       S.writingCb(nil)
       S.writingCb = nil
-    if S.writeBufLen > 0 and (statWriteEnded in S.stats or statWriteCorked notin S.stats):
+    if S.writeBufLen > 0 and (statWriteEnded in S.stats or S.writeCorks <= 0):
       let err = doClearBuf(S)
       if err < 0:
         S.error = newNodeError(err)
@@ -257,9 +259,9 @@ proc write*(S: NodeStream, buf: pointer, size: int,
     if cb != nil:
       cb(S.error)
     close(S)
-  elif statWriting     in    S.stats or 
-       statWriteCorked in    S.stats or 
-       statWriteReady  notin S.stats: 
+  elif statWriting    in    S.stats or 
+       statWriteReady notin S.stats or
+       S.writeCorks > 0: 
     addWriteBuf(S, buf, size, cb)
   else:
     assert S.writeBufLen == 0
@@ -287,17 +289,19 @@ proc writeCork*(S: NodeStream) =
   ## Forces buffering of all writes.
   ## 
   ## Buffered data will be flushed either at ``writeUncork()`` or at ``writeEnd()`` call.
-  incl(S.stats, statWriteCorked)
+  ## If called n-times for the same ``S``, n calls to ``writeUncork()`` are needed to uncork ``S``. 
+  inc(S.writeCorks)
 
 proc writeUncork*(S: NodeStream) = 
   ## Flush all data, buffered since ``writeCork()`` call.
-  if statWriteCorked in S.stats:
-    excl(S.stats, statWriteCorked)
+  if S.writeCorks > 0:
+    dec(S.writeCorks)
     if statClosed     notin S.stats and 
        statWriteEnded notin S.stats and 
        statWriteReady in    S.stats and 
        statWriting    notin S.stats and
-       S.writeBufLen > 0 :
+       S.writeCorks <= 0 and 
+       S.writeBufLen > 0:
       let err = doClearBuf(S)
       if err < 0:
         S.error = newNodeError(err)
