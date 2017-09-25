@@ -1,0 +1,62 @@
+<!DOCTYPE html><html><head><title>It may be wrong to use async/await or coroutine to execute low-level I/O.</title><meta charset='utf-8'><link href='https://dn-maxiang.qbox.me/res-min/themes/marxico.css' rel='stylesheet'><style>
+.note-content  {font-family: "Helvetica Neue", Arial, "Hiragino Sans GB", STHeiti, "Microsoft YaHei", "WenQuanYi Micro Hei", SimSun, Song, sans-serif;}
+
+</style></head><body><div id='preview-contents' class='note-content'>
+                        
+                    
+
+
+
+<h1 id="it-may-be-wrong-to-use-asyncawait-or-coroutine-to-execute-low-level-io">It may be wrong to use <code>async/await</code> or <code>coroutine</code> to execute low-level I/O.</h1>
+
+<p>I have spent several years on Node.js and libuv. I felt desperately that <code>callback functions</code>, <code>Promise</code> and <code>async/await</code> in Node.js work pretty well all the time. The <code>callback functions</code> is responsible for the low-level I/O, the data are read and written chunk by chunk. The <code>Promise</code> is responsible to wrap multiple <code>callback functions</code> to make a atomic I/O operation. And the <code>async/await</code> is responsible only to form a logical workflow.</p>
+
+<p>And I have two to three years experience in <code>asyncdispatch</code>, <code>asyncnet</code>, <code>asynchttpserver</code> of Nim and I have written several asynchronous modules. Now, I’m writting an asynchronous Mysql client/connector in pure Nim. However, I now feel that it is not appropriate to use <code>async/await</code> entirely.</p>
+
+<p>Now, let us suppose that we use a mysql client to execute some queries. This is a pseudo code:</p>
+
+<pre class="prettyprint hljs-dark"><code class="language-nim hljs nimrod"><span class="hljs-keyword">var</span> conn = newAsyncSocket()<br><br><span class="hljs-keyword">proc</span> query(sql: <span class="hljs-built_in">string</span>): <span class="hljs-type">Stream</span> <span class="hljs-meta">{.async.}</span> =<br>  await conn.send(mysql_format_function(sql))<br>  <span class="hljs-keyword">let</span> data = await conn.recv_mysql_function()<br>  mysql_parse_function(data) <br>  <span class="hljs-keyword">return</span> newStream(conn)<br><br><span class="hljs-keyword">proc</span> main() <span class="hljs-meta">{.async.}</span> =<br>  <span class="hljs-keyword">let</span> stream1 = await query(<span class="hljs-string">"select 100; select 200;"</span>)<br>  <span class="hljs-keyword">while</span> <span class="hljs-literal">true</span>:<br>    <span class="hljs-keyword">let</span> data = await stream1.read()<br>    echo data  <span class="hljs-comment"># 100, 200</span><br>    <span class="hljs-keyword">if</span> data == <span class="hljs-string">""</span>:<br>      <span class="hljs-keyword">break</span><br><br>  <span class="hljs-keyword">let</span> stream2 = await query(<span class="hljs-string">"select 300;  select 400;"</span>)<br>  <span class="hljs-keyword">while</span> <span class="hljs-literal">true</span>:<br>    <span class="hljs-keyword">let</span> data = await stream2.read()<br>    echo data  <span class="hljs-comment"># 300, 400</span><br>    <span class="hljs-keyword">if</span> data == <span class="hljs-string">""</span>:<br>      <span class="hljs-keyword">break</span><br><br>waitFor main()<br></code></pre>
+
+<p>The code work fine if <code>stream2</code> is always executing after <code>stream1</code>. However, if not:</p>
+
+
+
+<pre class="prettyprint hljs-dark"><code class="language-nim hljs nimrod"><span class="hljs-keyword">proc</span> main() <span class="hljs-meta">{.async.}</span> =<br>  <span class="hljs-keyword">let</span> stream1 = await query(<span class="hljs-string">"select 100; select 200;"</span>)<br>  <span class="hljs-keyword">let</span> stream2 = await query(<span class="hljs-string">"select 300;  select 400;"</span>)<br><br>  <span class="hljs-keyword">while</span> <span class="hljs-literal">true</span>:<br>    <span class="hljs-keyword">let</span> data = await stream1.read()<br>    echo data <br>    <span class="hljs-keyword">if</span> data == <span class="hljs-string">""</span>:<br>      <span class="hljs-keyword">break</span><br><br>  <span class="hljs-keyword">while</span> <span class="hljs-literal">true</span>:<br>    <span class="hljs-keyword">let</span> data = await stream2.read()<br>    echo data <br>    <span class="hljs-keyword">if</span> data == <span class="hljs-string">""</span>:<br>      <span class="hljs-keyword">break</span><br></code></pre>
+
+<p>or </p>
+
+
+
+<pre class="prettyprint hljs-dark"><code class="language-nim hljs nimrod"><span class="hljs-keyword">proc</span> do1() <span class="hljs-meta">{.async.}</span> =<br>  <span class="hljs-keyword">let</span> stream1 = await query(<span class="hljs-string">"select 100; select 200;"</span>)<br>  <span class="hljs-keyword">while</span> <span class="hljs-literal">true</span>:<br>    <span class="hljs-keyword">let</span> data = await stream1.read()<br>    echo data  <br>    <span class="hljs-keyword">if</span> data == <span class="hljs-string">""</span>:<br>      <span class="hljs-keyword">break</span><br><br><span class="hljs-keyword">proc</span> do2() <span class="hljs-meta">{.async.}</span> =<br>  <span class="hljs-keyword">let</span> stream2 = await query(<span class="hljs-string">"select 300;  select 400;"</span>)<br>  <span class="hljs-keyword">while</span> <span class="hljs-literal">true</span>:<br>    <span class="hljs-keyword">let</span> data = await stream2.read()<br>    echo data  <br>    <span class="hljs-keyword">if</span> data == <span class="hljs-string">""</span>:<br>      <span class="hljs-keyword">break</span><br><br><span class="hljs-keyword">proc</span> main() <span class="hljs-meta">{.async.}</span> =<br>  asyncCheck do1()<br>  asyncCheck do2()<br></code></pre>
+
+<p>What happened then? The <code>main function</code> will blocking at (await) <code>stream2</code> because <code>stream1</code> is never finished. What does <code>finished</code> mean? The <code>stream1 finished</code> is mean that <code>stream1</code> recv all the data that belong to the query of <code>select 100; select 200;</code>. </p>
+
+<pre class="prettyprint hljs-dark"><code class="language-? hljs clean">     stream1 data           stream2 data<br>|......................|....................|<br>|                      |                    |<br>v                      V                    V<br>stream1 begin       stream1 finished        stream2 finished<br>                    stream2 begin<br></code></pre>
+
+<p>A solution is to use lock or queue cache. This can solve the second problems, but it also introduce data race:</p>
+
+
+
+<pre class="prettyprint hljs-dark"><code class="language-nim hljs nimrod"><span class="hljs-keyword">proc</span> do1() <span class="hljs-meta">{.async.}</span> =<br>  await conn.lock()<br>  <span class="hljs-keyword">let</span> stream1 = await query(<span class="hljs-string">"select 100; select 200;"</span>)<br>  <span class="hljs-comment"># ...</span><br>  conn.release()<br><br><span class="hljs-keyword">proc</span> do2() <span class="hljs-meta">{.async.}</span> =<br>  await conn.lock()<br>  <span class="hljs-keyword">let</span> stream1 = await query(<span class="hljs-string">"select 100; select 200;"</span>)<br>  <span class="hljs-comment"># ...</span><br>  conn.release()<br></code></pre>
+
+<p>And it cannot prevent programmers to write the first kind of code:</p>
+
+
+
+<pre class="prettyprint hljs-dark"><code class="language-nim hljs nimrod"><span class="hljs-keyword">proc</span> main() <span class="hljs-meta">{.async.}</span> =<br>  <span class="hljs-keyword">let</span> stream1 = await query(<span class="hljs-string">"select 100; select 200;"</span>)<br>  <span class="hljs-keyword">let</span> stream2 = await query(<span class="hljs-string">"select 300;  select 400;"</span>)<br></code></pre>
+
+<p>Each of your asynchronous functions must be atomic. Otherwise, there are traps in them. The atomic function is mean that you can not construct streaming interfaces:</p>
+
+
+
+<pre class="prettyprint hljs-dark"><code class="language-nim hljs nimrod"><span class="hljs-keyword">proc</span> main() <span class="hljs-meta">{.async.}</span> =<br>  <span class="hljs-keyword">let</span> all_data1 = await query(<span class="hljs-string">"select 100; select 200;"</span>)<br>  <span class="hljs-keyword">let</span> all_data2 = await query(<span class="hljs-string">"select 300;  select 400;"</span>)<br></code></pre>
+
+<p>It is very bad to transfer large data, and it is a huge issue whenever you use <code>async/await</code> to write any program .</p>
+
+<hr>
+
+<p>Ideally, using some <code>callback functions</code> to execute low-level I/O, using some <code>Future</code> to wrap these <code>callback functions</code> into atomic operations, and using <code>async/await</code> to construct the final logical workflow, then you can get the perfect solution:</p>
+
+
+
+<pre class="prettyprint hljs-dark"><code class="language-nim hljs nimrod"><span class="hljs-comment"># `Future` wrapper</span><br><span class="hljs-keyword">proc</span> query(sql: <span class="hljs-built_in">string</span>, fileStream: <span class="hljs-type">FileStream</span>): retFuture[<span class="hljs-built_in">void</span>]  =  <br>  <span class="hljs-keyword">var</span> retFuture = newFuture[<span class="hljs-built_in">void</span>]()<br><br>  <span class="hljs-keyword">let</span> stream = conn.send(mysql_format_function(sql))  <span class="hljs-comment"># I/O interface</span><br><br>  stream.onBegin() <span class="hljs-keyword">do</span> (data: <span class="hljs-built_in">string</span>):                 <span class="hljs-comment"># I/O interface</span><br>    fileStream.write(data)<br><br>  stream.onFinished() <span class="hljs-keyword">do</span> ():                          <span class="hljs-comment"># I/O interface</span><br>    complete(retFuture)<br><br><span class="hljs-comment"># logical workflow</span><br><span class="hljs-keyword">proc</span> main() <span class="hljs-meta">{.async.}</span> =<br>  await query(<span class="hljs-string">"select 100; select 200;"</span>)  <span class="hljs-comment"># write to file </span><br>  await query(<span class="hljs-string">"select 300; select 400;"</span>)  <span class="hljs-comment"># write to file</span><br></code></pre></div></body></html>

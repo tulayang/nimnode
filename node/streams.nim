@@ -35,10 +35,11 @@ type
     readBufLen: int
     readCb: proc (data: pointer, size: int) {.closure, gcsafe.}
     readEndCb: proc () {.closure, gcsafe.}
-    writeBuf: seq[tuple[base: pointer, length: int, cb: proc (err: ref NodeError) {.closure, gcsafe.}]]
+    writeBuf: seq[Buffer]
     writeBufLen: int
+    writeCbBuf: seq[proc (err: ref NodeError) {.closure, gcsafe.}]
+    writeCbBufLen: int
     writeQueueSize: int
-    writeCorks: int
     writeDrainCb: proc () {.closure, gcsafe.}
     writeEndCb: proc () {.closure, gcsafe.}
     writingReq: Write
@@ -83,15 +84,16 @@ proc clearWrite(S: NodeStream) =
     S.writingCb(S.error)
     S.writingCb = nil
   # if there are still unprocessed write requests
-  for i in 0..<S.writeBufLen:
-    let cb = S.writeBuf[i].cb
+  for i in 0..<S.writeCbBufLen:
+    let cb = S.writeCbBuf[i]
     if cb != nil:
       cb(S.error)
   setLen(S.writeBuf, 0)
+  setLen(S.writeCbBuf, 0)
   S.writeBufLen = 0
+  S.writeCbBufLen = 0
   S.writeQueueSize = 0
   S.writingSize = 0
-  S.writeCorks = 0
 
 proc closeCb(handle: ptr Handle) {.cdecl.} =
   var S = cast[NodeStream](handle.data)
@@ -131,8 +133,6 @@ proc writeEnd*(S: NodeStream) =
   if statClosed     notin S.stats and 
      statWriteEnded notin S.stats: 
     incl(S.stats, statWriteEnded)
-    if S.writeCorks > 0:
-      S.writeCorks = 0 # Remove the cork, write out all
     if statWriteReady in    S.stats and 
        statWriting    notin S.stats and 
        S.writeBufLen > 0:
@@ -179,7 +179,7 @@ proc writingCb(req: ptr Write, status: cint) {.cdecl.} =
     if S.writingCb != nil:
       S.writingCb(nil)
       S.writingCb = nil
-    if S.writeBufLen > 0 and (statWriteEnded in S.stats or S.writeCorks <= 0):
+    if S.writeBufLen > 0 and statWriteEnded in S.stats:
       let err = doClearBuf(S)
       if err < 0:
         S.error = newNodeError(err)
@@ -199,52 +199,36 @@ proc doWriteData(S: NodeStream, buf: pointer, size: int,
                  addr(buffer), 1, writingCb)
 
 proc doWriteBuf(S: NodeStream): cint =
-  assert S.writeBufLen > 1
-  let n = S.writeBufLen
-  var writingSize = 0
-  var bufs = cast[ptr Buffer](alloc(n * sizeof(Buffer)))
-  var cbs = newSeqOfCap[proc (err: ref NodeError) {.closure, gcsafe.}](n)
-  for i in 0..<n:
-    var buf = cast[ptr Buffer](cast[ByteAddress](bufs) + i * sizeof(Buffer))
-    buf.base = S.writeBuf[i].base
-    buf.length = S.writeBuf[i].length
-    add(cbs, S.writeBuf[i].cb)
-    inc(writingSize, S.writeBuf[i].length)
   S.writingReq = Write()
   result = write(addr(S.writingReq), cast[ptr Stream](addr(S.handle)), 
-                 bufs, cuint(n), writingCb)
-  if result < 0:
-    dealloc(bufs)
-  else:
-    GC_ref(cbs)
+                 cast[ptr Buffer](S.writeBuf[0].addr), cuint(S.writeBufLen), writingCb)
+  if result >= 0:
+    var cbs = S.writeCbBuf
     S.writingCb = proc (err: ref NodeError) =
       for cb in cbs:
-        if cb != nil:
-          cb(err)
-      GC_unref(cbs)
-      cbs = nil
-      dealloc(bufs)
-    S.writingSize = writingSize
+        cb(err)
+    S.writingSize = S.writeQueueSize
 
 proc doClearBuf(S: NodeStream): cint =
   assert S.writeBufLen > 0
-  if S.writeBufLen == 1:
-    let err = doWriteData(S, S.writeBuf[0].base, 
-                          S.writeBuf[0].length, S.writeBuf[0].cb)
-    if err < 0:
-      return err
-  else:
-    let err = doWriteBuf(S)
-    if err < 0:
-      return err
+  S.writingReq = Write()
+  result = doWriteBuf(S)
+  if result < 0:
+    return result
   setLen(S.writeBuf, 0)
+  setLen(S.writeCbBuf, 0)
   S.writeBufLen = 0
-  return 0
+  S.writeCbBufLen = 0
 
 proc addWriteBuf(S: NodeStream, buf: pointer, size: int, 
                  cb: proc (err: ref NodeError) {.closure, gcsafe.}) =
-  add(S.writeBuf, (base: buf, length: size, cb: cb))
+  add(S.writeBuf, Buffer())
+  S.writeBuf[S.writeBufLen].base = buf
+  S.writeBuf[S.writeBufLen].length = size
   inc(S.writeBufLen)
+  if cb != nil:
+    add(S.writeCbBuf, cb)
+    inc(S.writeCbBufLen)
   inc(S.writeQueueSize, size)   
   if S.writeQueueSize >= WriteOverLevel:
     incl(S.stats, statWriteNeedDrain)
@@ -260,8 +244,7 @@ proc write*(S: NodeStream, buf: pointer, size: int,
       cb(S.error)
     close(S)
   elif statWriting    in    S.stats or 
-       statWriteReady notin S.stats or
-       S.writeCorks > 0: 
+       statWriteReady notin S.stats: 
     addWriteBuf(S, buf, size, cb)
   else:
     assert S.writeBufLen == 0
@@ -284,30 +267,6 @@ proc write*(S: NodeStream, buf: string,
     GC_unref(buf)
     if cb != nil:
       cb(err)
-
-proc writeCork*(S: NodeStream) =
-  ## Forces buffering of all writes.
-  ## 
-  ## Buffered data will be flushed either at ``writeUncork()`` or at ``writeEnd()`` call.
-  ## If called n-times for the same ``S``, n calls to ``writeUncork()`` are needed to uncork ``S``. 
-  inc(S.writeCorks)
-
-proc writeUncork*(S: NodeStream) = 
-  ## Flush all data, buffered since ``writeCork()`` call.
-  if S.writeCorks > 0:
-    dec(S.writeCorks)
-    if statClosed     notin S.stats and 
-       statWriteEnded notin S.stats and 
-       statWriteReady in    S.stats and 
-       statWriting    notin S.stats and
-       S.writeCorks <= 0 and 
-       S.writeBufLen > 0:
-      let err = doClearBuf(S)
-      if err < 0:
-        S.error = newNodeError(err)
-        close(S)
-      else:
-        incl(S.stats, statWriting)
 
 proc allocCb(handle: ptr Handle, size: csize, buf: ptr Buffer) {.cdecl.} =
   let S = cast[NodeStream](handle.data)
@@ -410,6 +369,7 @@ proc newTcpStream(): TcpStream =
   new(result)
   GC_ref(result) 
   result.writeBuf = @[]
+  result.writeCbBuf = @[]
   result.stats = {}
   let err = init(getDefaultLoop(), cast[ptr Tcp](addr(result.handle)))
   if err < 0:
