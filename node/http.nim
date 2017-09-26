@@ -104,7 +104,6 @@ proc request*(h: HttpServerStream): tuple[
   protocol: tuple[orig: string, major, minor: int], 
   headers: StringTableRef
 ] =
-  # TODO 优化，深 copy 转为浅 copy
   getHead(h.parser)
 
 proc `onRequest=`*(s: HttpServer, cb: proc (stream: HttpServerStream) {.closure, gcsafe.}) =
